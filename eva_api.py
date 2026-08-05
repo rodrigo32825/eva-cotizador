@@ -14,7 +14,7 @@ class EvaApiError(RuntimeError):
 class EvaApi:
     base_url: str
     token: str
-    timeout_seconds: int = 30
+    timeout_seconds: int = 90
 
     def _post(self, action: str, **payload: Any) -> dict[str, Any]:
         body = {"token": self.token, "action": action, **payload}
