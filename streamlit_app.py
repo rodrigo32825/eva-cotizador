@@ -11,7 +11,7 @@ from eva_api import EvaApi, EvaApiError
 
 
 APP_DIR = Path(__file__).resolve().parent
-LOGO_PATH = APP_DIR / "assets" / "proyecto_eva_logo.jpeg"
+LOGO_PATH = APP_DIR / "proyecto_eva_logo.jpeg"
 
 st.set_page_config(
     page_title="Cotizador Proyecto EVA",
