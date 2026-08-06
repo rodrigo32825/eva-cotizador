@@ -812,7 +812,9 @@ def create_flight_option_widget(
                         placeholder="Ej. AM 001",
                     )
 
-                    d, e, f, g = st.columns(4)
+                    # Fila 1: origen y destino
+                    d, e = st.columns(2)
+
                     origin_label = d.selectbox(
                         "Origen *",
                         airport_labels,
@@ -821,6 +823,7 @@ def create_flight_option_widget(
                         placeholder="Escribe ciudad, aeropuerto o IATA",
                         help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
+
                     destination_label = e.selectbox(
                         "Destino *",
                         airport_labels,
@@ -829,30 +832,38 @@ def create_flight_option_widget(
                         placeholder="Escribe ciudad, aeropuerto o IATA",
                         help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
-
+                    
+                    # Fila 2: salida
+                    f, g = st.columns(2)
+                    
                     departure_date = f.date_input(
                         "Fecha de salida *",
                         value=None,
                         key=f"departure_date_{quote_id}_{label}_{segment_index}",
                     )
+                    
                     departure_time = g.time_input(
                         "Hora de salida",
                         value=time(8, 0),
                         key=f"departure_time_{quote_id}_{label}_{segment_index}",
                     )
-
+                    
+                    # Fila 3: llegada
                     h, i = st.columns(2)
-
+                    
                     arrival_date = h.date_input(
                         "Fecha de llegada *",
                         value=None,
                         key=f"arrival_date_{quote_id}_{label}_{segment_index}",
                     )
+                    
                     arrival_time = i.time_input(
                         "Hora de llegada",
                         value=time(12, 0),
                         key=f"arrival_time_{quote_id}_{label}_{segment_index}",
                     )
+
+                    
 
                     st.caption("Tarifa y equipaje")
                     k, l, m = st.columns(3)
