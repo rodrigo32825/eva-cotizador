@@ -58,8 +58,9 @@ def init_state() -> None:
         "page": "Inicio",
         "quote_step": 1,
         "draft": {
-            "pasajero_principal": "",
-            "acompanantes": [],
+            "nombres": "",
+            "apellido_paterno": "",
+            "apellido_materno": "",
             "cliente_contacto": "",
             "correo": "",
             "telefono": "",
@@ -154,7 +155,7 @@ def page_new_quote() -> None:
     st.caption("Todo se conserva localmente hasta que decidas guardar.")
     step = st.session_state.quote_step
     step_names = {
-        1: "Pasajero",
+        1: "Viajero",
         2: "Contenido",
         3: "Captura",
         4: "Revisión",
@@ -164,19 +165,57 @@ def page_new_quote() -> None:
     st.progress(step / 5)
 
     if step == 1:
-        st.markdown("### Pasajero y contacto")
-        passenger = st.text_input("Nombre completo del pasajero principal *", value=draft["pasajero_principal"], placeholder="Ej. Rodrigo Zambrano Valdivia")
-        companions = st.text_area("Acompañantes", value="\n".join(draft["acompanantes"]), placeholder="Un nombre por línea")
+        st.markdown("### Viajero y contacto")
+
+        nombres = st.text_input(
+            "Nombre(s) *",
+            value=draft["nombres"],
+            placeholder="Ej. Evelyne",
+        )
+
         c1, c2 = st.columns(2)
-        contact = c1.text_input("Cliente o contacto", value=draft["cliente_contacto"], placeholder="Puede ser distinto al pasajero")
-        phone = c2.text_input("Teléfono", value=draft["telefono"])
-        email = st.text_input("Correo", value=draft["correo"])
+        apellido_paterno = c1.text_input(
+            "Apellido paterno *",
+            value=draft["apellido_paterno"],
+            placeholder="Ej. Charland",
+        )
+        apellido_materno = c2.text_input(
+            "Apellido materno",
+            value=draft["apellido_materno"],
+            placeholder="Déjalo vacío si no aplica",
+        )
+
+        st.caption(
+            "Captura el nombre exactamente como aparece en el pasaporte "
+            "o identificación del viajero."
+        )
+
+        c3, c4 = st.columns(2)
+        contact = c3.text_input(
+            "Cliente o contacto",
+            value=draft["cliente_contacto"],
+            placeholder="Puede ser distinto al viajero",
+        )
+        phone = c4.text_input(
+            "Teléfono",
+            value=draft["telefono"],
+        )
+        email = st.text_input(
+            "Correo",
+            value=draft["correo"],
+        )
+
         if st.button("Continuar", type="primary", use_container_width=True):
-            if not passenger.strip():
-                st.warning("Escribe el nombre del pasajero principal.")
+            if not nombres.strip():
+                st.warning("Escribe el nombre o nombres del viajero.")
                 return
-            draft["pasajero_principal"] = passenger.strip()
-            draft["acompanantes"] = [item.strip() for item in companions.splitlines() if item.strip()]
+            if not apellido_paterno.strip():
+                st.warning("Escribe el apellido paterno del viajero.")
+                return
+
+            draft["nombres"] = nombres.strip()
+            draft["apellido_paterno"] = apellido_paterno.strip()
+            draft["apellido_materno"] = apellido_materno.strip()
             draft["cliente_contacto"] = contact.strip()
             draft["telefono"] = phone.strip()
             draft["correo"] = email.strip()
@@ -256,7 +295,19 @@ def page_new_quote() -> None:
 
     elif step == 4:
         st.markdown("### Revisión")
-        section_card(draft["pasajero_principal"] or "Pasajero sin nombre", "Verifica que el nombre esté escrito exactamente como debe aparecer.")
+        nombre_completo = " ".join(
+            parte
+            for parte in [
+                draft["nombres"],
+                draft["apellido_paterno"],
+                draft["apellido_materno"],
+            ]
+            if parte
+        )
+        section_card(
+            nombre_completo or "Viajero sin nombre",
+            "Verifica que el nombre esté escrito exactamente como aparece en su documento.",
+        )
         st.write("**Componentes incluidos:**")
         for item in draft["componentes"]:
             st.write(f"• {item}")
