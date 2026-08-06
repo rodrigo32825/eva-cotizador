@@ -829,22 +829,24 @@ def create_flight_option_widget(
                         placeholder="Escribe ciudad, aeropuerto o IATA",
                         help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
+
                     departure_date = f.date_input(
                         "Fecha de salida *",
                         value=None,
                         key=f"departure_date_{quote_id}_{label}_{segment_index}",
                     )
-                    arrival_date = g.date_input(
-                        "Fecha de llegada *",
-                        value=None,
-                        key=f"arrival_date_{quote_id}_{label}_{segment_index}",
-                    )
-
-                    h, i = st.columns(2)
-                    departure_time = h.time_input(
+                    departure_time = g.time_input(
                         "Hora de salida",
                         value=time(8, 0),
                         key=f"departure_time_{quote_id}_{label}_{segment_index}",
+                    )
+
+                    h, i = st.columns(2)
+
+                    arrival_date = h.date_input(
+                        "Fecha de llegada *",
+                        value=None,
+                        key=f"arrival_date_{quote_id}_{label}_{segment_index}",
                     )
                     arrival_time = i.time_input(
                         "Hora de llegada",
