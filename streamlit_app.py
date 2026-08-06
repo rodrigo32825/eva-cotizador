@@ -142,15 +142,23 @@ def load_passengers(api_url: str, api_token: str, query: str = "") -> list[dict[
     )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_quote_bundle(api_url: str, api_token: str, quote_id: str) -> dict[str, Any]:
     return EvaApi(api_url, api_token).quote_bundle(quote_id)
 
 
-def clear_app_cache() -> None:
+def clear_quote_session() -> None:
+    st.session_state.pop("eva_open_quote_id", None)
+    st.session_state.pop("eva_open_quote_bundle", None)
+
+
+def clear_app_cache(*, include_catalogs: bool = False) -> None:
     load_quotes.clear()
     load_passengers.clear()
     load_quote_bundle.clear()
+    clear_quote_session()
+    if include_catalogs:
+        load_bootstrap.clear()
 
 
 def iso(value: date | None) -> str:
@@ -813,7 +821,6 @@ def create_flight_option_widget(
 
                     # Fila 1: origen y destino
                     d, e = st.columns(2)
-
                     origin_label = d.selectbox(
                         "Origen *",
                         airport_labels,
@@ -822,7 +829,6 @@ def create_flight_option_widget(
                         placeholder="Escribe ciudad, aeropuerto o IATA",
                         help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
-
                     destination_label = e.selectbox(
                         "Destino *",
                         airport_labels,
@@ -831,38 +837,32 @@ def create_flight_option_widget(
                         placeholder="Escribe ciudad, aeropuerto o IATA",
                         help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
-                    
+
                     # Fila 2: salida
                     f, g = st.columns(2)
-                    
                     departure_date = f.date_input(
                         "Fecha de salida *",
                         value=None,
                         key=f"departure_date_{quote_id}_{label}_{segment_index}",
                     )
-                    
                     departure_time = g.time_input(
                         "Hora de salida",
                         value=time(8, 0),
                         key=f"departure_time_{quote_id}_{label}_{segment_index}",
                     )
-                    
+
                     # Fila 3: llegada
                     h, i = st.columns(2)
-                    
                     arrival_date = h.date_input(
                         "Fecha de llegada *",
                         value=None,
                         key=f"arrival_date_{quote_id}_{label}_{segment_index}",
                     )
-                    
                     arrival_time = i.time_input(
                         "Hora de llegada",
                         value=time(12, 0),
                         key=f"arrival_time_{quote_id}_{label}_{segment_index}",
                     )
-
-                    
 
                     st.caption("Tarifa y equipaje")
                     k, l, m = st.columns(3)
@@ -1278,12 +1278,33 @@ def create_hotel_widget(
 def page_quotes(api: EvaApi, actor_name: str, bootstrap: dict[str, Any]) -> None:
     st.subheader("Cotizaciones")
     show_flash()
-    query = st.text_input("Buscar por folio, cliente, destino o estatus")
+
+    # La lista completa se descarga una sola vez y la búsqueda se hace localmente.
     try:
-        rows = load_quotes(api.base_url, api.token, query)
+        all_rows = load_quotes(api.base_url, api.token)
     except EvaApiError as exc:
         st.error(str(exc))
         return
+
+    query = st.text_input("Buscar por folio, cliente, destino o estatus")
+    query_text = clean_text(query).lower()
+    if query_text:
+        rows = [
+            row
+            for row in all_rows
+            if query_text
+            in " ".join(
+                str(row.get(field, ""))
+                for field in [
+                    "COTIZACION_ID",
+                    "CLIENTE_NOMBRE",
+                    "DESTINO_RESUMEN",
+                    "ESTATUS",
+                ]
+            ).lower()
+        ]
+    else:
+        rows = all_rows
 
     if not rows:
         st.info("No se encontraron cotizaciones.")
@@ -1293,8 +1314,7 @@ def page_quotes(api: EvaApi, actor_name: str, bootstrap: dict[str, Any]) -> None
         f"{row.get('COTIZACION_ID', '')} · {row.get('CLIENTE_NOMBRE', 'Sin cliente')}": row
         for row in rows
     }
-    default_index = 0
-    selected_label = st.selectbox("Abrir cotización", list(quote_map), index=default_index)
+    selected_label = st.selectbox("Abrir cotización", list(quote_map), index=0)
     selected = quote_map[selected_label]
     quote_id = str(selected.get("COTIZACION_ID", ""))
 
@@ -1304,11 +1324,33 @@ def page_quotes(api: EvaApi, actor_name: str, bootstrap: dict[str, Any]) -> None
     c3.metric("Pasajeros", selected.get("NUM_PASAJEROS", ""))
     c4.metric("Moneda", selected.get("MONEDA", ""))
 
-    try:
-        bundle = load_quote_bundle(api.base_url, api.token, quote_id)
-    except EvaApiError as exc:
-        st.error(str(exc))
-        return
+    refresh_col, status_col = st.columns([1, 2.4])
+    refresh_requested = refresh_col.button(
+        "Actualizar desde Sheets",
+        key=f"refresh_quote_{quote_id}",
+        use_container_width=True,
+    )
+
+    if refresh_requested:
+        load_quote_bundle.clear()
+        clear_quote_session()
+
+    session_quote_id = st.session_state.get("eva_open_quote_id")
+    session_bundle = st.session_state.get("eva_open_quote_bundle")
+
+    if session_quote_id == quote_id and isinstance(session_bundle, dict):
+        bundle = session_bundle
+        status_col.caption("Cotización cargada en memoria. Los cambios de campos no consultan Google Sheets.")
+    else:
+        try:
+            with st.spinner("Abriendo cotización..."):
+                bundle = load_quote_bundle(api.base_url, api.token, quote_id)
+        except EvaApiError as exc:
+            st.error(str(exc))
+            return
+        st.session_state["eva_open_quote_id"] = quote_id
+        st.session_state["eva_open_quote_bundle"] = bundle
+        status_col.caption("Cotización descargada y guardada en memoria para esta sesión.")
 
     tab_summary, tab_flights, tab_hotels, tab_services = st.tabs(
         ["Resumen", "Opciones de vuelo", "Hospedajes", "Servicios adicionales"]
@@ -1384,7 +1426,7 @@ def main() -> None:
             ["Inicio", "Nueva cotización", "Pasajeros", "Cotizaciones"],
         )
         if st.button("Sincronizar con Google Sheets", use_container_width=True):
-            clear_app_cache()
+            clear_app_cache(include_catalogs=True)
             st.rerun()
         st.caption("Contacto institucional: travel@proyectoeva.mx")
 
