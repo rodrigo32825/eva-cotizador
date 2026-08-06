@@ -152,13 +152,16 @@ def page_new_quote() -> None:
     draft = st.session_state.draft
     st.markdown("## Nueva cotización")
     st.caption("Todo se conserva localmente hasta que decidas guardar.")
-    p1, p2, p3, p4, p5 = st.columns(5)
-    p1.metric("1", "Pasajero")
-    p2.metric("2", "Contenido")
-    p3.metric("3", "Captura")
-    p4.metric("4", "Revisión")
-    p5.metric("5", "PDF / Guardar")
     step = st.session_state.quote_step
+    step_names = {
+        1: "Pasajero",
+        2: "Contenido",
+        3: "Captura",
+        4: "Revisión",
+        5: "PDF y guardado",
+    }
+    st.caption(f"Paso {step} de 5 · {step_names[step]}")
+    st.progress(step / 5)
 
     if step == 1:
         st.markdown("### Pasajero y contacto")
