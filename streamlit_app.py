@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time
 from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import unquote
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from eva_api import EvaApi, EvaApiError
@@ -183,6 +186,93 @@ def integer(value: Any, default: int = 0) -> int:
 
 def money(value: Any, currency: str) -> str:
     return f"{currency} {number(value):,.2f}"
+
+
+def is_http_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("https://") or text.startswith("http://")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def resolve_map_url(url: str) -> str:
+    """Resuelve enlaces cortos de Google Maps cuando sea posible."""
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return ""
+    if "maps.app.goo.gl" not in clean_url and "goo.gl/maps" not in clean_url:
+        return clean_url
+    try:
+        response = requests.get(
+            clean_url,
+            allow_redirects=True,
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0 Proyecto EVA Cotizador"},
+            stream=True,
+        )
+        return str(response.url or clean_url)
+    except requests.RequestException:
+        return clean_url
+
+
+def coordinates_from_map_url(url: str) -> tuple[float, float] | None:
+    resolved = unquote(resolve_map_url(url))
+    if not resolved:
+        return None
+
+    patterns = [
+        r"@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)",
+        r"!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)",
+        r"[?&](?:q|query|ll)=(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, resolved, flags=re.IGNORECASE)
+        if not match:
+            continue
+        lat, lon = float(match.group(1)), float(match.group(2))
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return lat, lon
+    return None
+
+
+def show_simple_map(map_url: str, *, caption_when_missing: bool = True) -> None:
+    map_url = str(map_url or "").strip()
+    if not map_url:
+        return
+    st.link_button("Abrir ubicación en Google Maps", map_url, use_container_width=True)
+    coordinates = coordinates_from_map_url(map_url)
+    if coordinates:
+        lat, lon = coordinates
+        st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=14, use_container_width=True)
+    elif caption_when_missing:
+        st.caption(
+            "El enlace quedó guardado. La vista previa aparece cuando Google Maps incluye "
+            "las coordenadas dentro del vínculo; el botón siempre abrirá la ubicación correcta."
+        )
+
+
+def parse_sheet_datetime(date_value: Any, time_value: Any) -> datetime | None:
+    date_text = str(date_value or "").strip()[:10]
+    time_text_value = str(time_value or "").strip()[:5]
+    if not date_text or not time_text_value:
+        return None
+    for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            parsed_date = datetime.strptime(date_text, date_format).date()
+            parsed_time = datetime.strptime(time_text_value, "%H:%M").time()
+            return datetime.combine(parsed_date, parsed_time)
+        except ValueError:
+            continue
+    return None
+
+
+def human_duration(total_minutes: int) -> str:
+    total_minutes = max(int(total_minutes), 0)
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} h {minutes} min"
+    if hours:
+        return f"{hours} h"
+    return f"{minutes} min"
 
 
 def passenger_label(row: dict[str, Any]) -> str:
@@ -458,10 +548,9 @@ def page_new_quote(api: EvaApi, actor_name: str, bootstrap: dict[str, Any]) -> N
     st.info("Ahora abre la sección Cotizaciones para agregar las opciones de vuelo.")
 
 
-def catalog_maps(bootstrap: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def catalog_maps(bootstrap: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     airlines = bootstrap.get("aerolineas", [])
     airports = bootstrap.get("aeropuertos", [])
-    providers = bootstrap.get("proveedores", [])
 
     airline_map = {
         f"{row.get('IATA', '')} · {row.get('NOMBRE', '')}": row
@@ -473,12 +562,7 @@ def catalog_maps(bootstrap: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], 
         for row in airports
         if row.get("IATA")
     }
-    provider_map = {
-        f"{row.get('NOMBRE_COMERCIAL', '')} · {row.get('PROVEEDOR_ID', '')}": row
-        for row in providers
-        if row.get("PROVEEDOR_ID")
-    }
-    return airline_map, airport_map, provider_map
+    return airline_map, airport_map
 
 
 def render_flight_options(bundle: dict[str, Any], quote: dict[str, Any]) -> None:
@@ -516,27 +600,54 @@ def render_flight_options(bundle: dict[str, Any], quote: dict[str, Any]) -> None
                 st.caption(f"Aprox. {money(per_person, currency)} por persona")
 
             if not option_flights:
-                st.warning("Esta opción todavía no tiene segmentos registrados.")
+                st.warning("Esta opción todavía no tiene vuelos registrados.")
                 continue
 
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            group_order: list[str] = []
             for flight in option_flights:
-                origin = str(flight.get("ORIGEN_IATA", ""))
-                destination = str(flight.get("DESTINO_IATA", ""))
-                airline = str(flight.get("AEROLINEA_IATA", ""))
-                flight_number = str(flight.get("NUMERO_VUELO", ""))
-                departure = str(flight.get("HORA_SALIDA", ""))[:5]
-                arrival = str(flight.get("HORA_LLEGADA", ""))[:5]
-                segment_type = str(flight.get("TIPO_TRAMO", ""))
-                st.markdown(
-                    f"""
-                    <div class="eva-card">
-                      <div class="eva-route">{origin} {departure} &nbsp;→&nbsp; {destination} {arrival}</div>
-                      <div class="eva-subtle">{airline} {flight_number} · {flight.get('FECHA_SALIDA', '')} · {segment_type}</div>
-                      <div class="eva-subtle">Equipaje: {flight.get('EQUIPAJE', 'Sin especificar')} · Proveedor: {flight.get('PROVEEDOR_ID', 'Sin especificar')}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                group = str(flight.get("GRUPO_TRAMO") or flight.get("TIPO_TRAMO") or "TRAYECTO")
+                if group not in grouped:
+                    grouped[group] = []
+                    group_order.append(group)
+                grouped[group].append(flight)
+
+            for group in group_order:
+                group_flights = grouped[group]
+                route_parts = [str(group_flights[0].get("ORIGEN_IATA", ""))]
+                route_parts.extend(str(item.get("DESTINO_IATA", "")) for item in group_flights)
+                scale_count = max(len(group_flights) - 1, 0)
+                scale_label = "Directo" if scale_count == 0 else f"{scale_count} escala" + ("s" if scale_count > 1 else "")
+                st.markdown(f"#### {group.replace('_', ' ').title()} · {' → '.join(route_parts)}")
+                st.caption(scale_label)
+
+                for idx, flight in enumerate(group_flights):
+                    origin = str(flight.get("ORIGEN_IATA", ""))
+                    destination = str(flight.get("DESTINO_IATA", ""))
+                    airline = str(flight.get("AEROLINEA_IATA", ""))
+                    flight_number = str(flight.get("NUMERO_VUELO", ""))
+                    departure = str(flight.get("HORA_SALIDA", ""))[:5]
+                    arrival = str(flight.get("HORA_LLEGADA", ""))[:5]
+                    st.markdown(
+                        f"""
+                        <div class="eva-card">
+                          <div class="eva-route">{origin} {departure} &nbsp;→&nbsp; {destination} {arrival}</div>
+                          <div class="eva-subtle">{airline} {flight_number} · {flight.get('FECHA_SALIDA', '')}</div>
+                          <div class="eva-subtle">Equipaje: {flight.get('EQUIPAJE', 'Sin especificar')}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    if idx < len(group_flights) - 1:
+                        next_flight = group_flights[idx + 1]
+                        arrival_dt = parse_sheet_datetime(flight.get("FECHA_LLEGADA"), flight.get("HORA_LLEGADA"))
+                        next_departure_dt = parse_sheet_datetime(
+                            next_flight.get("FECHA_SALIDA"), next_flight.get("HORA_SALIDA")
+                        )
+                        layover_text = "Tiempo de conexión pendiente"
+                        if arrival_dt and next_departure_dt and next_departure_dt >= arrival_dt:
+                            layover_text = human_duration(int((next_departure_dt - arrival_dt).total_seconds() // 60))
+                        st.info(f"Escala en {destination}: {layover_text}")
 
 
 def create_flight_option_widget(
@@ -549,34 +660,67 @@ def create_flight_option_widget(
     quote_id = str(quote.get("COTIZACION_ID", ""))
     currency = str(quote.get("MONEDA") or "MXN")
     passenger_count = max(integer(quote.get("NUM_PASAJEROS"), 1), 1)
-    airline_map, airport_map, provider_map = catalog_maps(bootstrap)
+    airline_map, airport_map = catalog_maps(bootstrap)
 
     if not airline_map:
         st.warning("No hay aerolíneas activas en 10_CAT_AEROLINEAS.")
         return
-    if not provider_map:
-        st.warning("No hay proveedores activos en 12_CAT_PROVEEDORES.")
-        return
 
     existing_options = bundle.get("opciones", [])
     default_name = f"Opción {len(existing_options) + 1}"
-    segment_count = st.number_input(
-        "¿Cuántos segmentos tiene esta opción?",
-        min_value=1,
-        max_value=8,
-        value=2,
-        step=1,
-        key=f"segment_count_{quote_id}",
-        help="Ejemplo: ida y regreso directos = 2 segmentos. Una conexión agrega otro segmento.",
+    trip_type = st.radio(
+        "Tipo de viaje",
+        ["Viaje sencillo", "Viaje redondo", "Multidestino"],
+        horizontal=True,
+        key=f"trip_type_{quote_id}",
     )
 
+    if trip_type == "Viaje sencillo":
+        journey_labels = ["IDA"]
+    elif trip_type == "Viaje redondo":
+        journey_labels = ["IDA", "REGRESO"]
+    else:
+        journey_count = st.number_input(
+            "Número de trayectos",
+            min_value=2,
+            max_value=8,
+            value=3,
+            step=1,
+            key=f"journey_count_{quote_id}",
+            help="Cada trayecto representa un destino real, no una escala.",
+        )
+        journey_labels = [f"TRAYECTO_{idx + 1}" for idx in range(int(journey_count))]
+
+    stop_counts: dict[str, int] = {}
+    st.markdown("#### Escalas por trayecto")
+    for label in journey_labels:
+        friendly = label.replace("_", " ").title()
+        col_check, col_count = st.columns([2.4, 1])
+        has_stops = col_check.checkbox(
+            f"{friendly}: incluye escala(s)",
+            key=f"has_stops_{quote_id}_{label}",
+        )
+        if has_stops:
+            stop_counts[label] = int(
+                col_count.number_input(
+                    "Número de escalas",
+                    min_value=1,
+                    max_value=4,
+                    value=1,
+                    step=1,
+                    key=f"stop_count_{quote_id}_{label}",
+                    label_visibility="visible",
+                )
+            )
+        else:
+            stop_counts[label] = 0
+
     airline_labels = list(airline_map)
-    provider_labels = list(provider_map)
 
     with st.form(f"flight_option_form_{quote_id}", clear_on_submit=False):
         st.markdown("#### Datos de la opción")
         c1, c2 = st.columns([2.4, 1])
-        option_name = c1.text_input("Nombre de la opción *", value=default_name, placeholder="Ej. Aeroméxico directo")
+        option_name = c1.text_input("Nombre de la opción *", value=default_name, placeholder="Ej. Aeroméxico con escala")
         recommended = c2.checkbox("Marcar como recomendada")
         description = st.text_input(
             "Descripción breve",
@@ -623,104 +767,109 @@ def create_flight_option_widget(
             )
             internal_notes = st.text_area("Notas internas de la opción")
 
-        st.markdown("#### Segmentos")
-        segments: list[dict[str, Any]] = []
-        for idx in range(int(segment_count)):
-            with st.expander(f"Segmento {idx + 1}", expanded=True):
-                a, b, c = st.columns([1.35, 1, 1])
-                airline_label = a.selectbox(
-                    "Aerolínea *",
-                    airline_labels,
-                    key=f"airline_{quote_id}_{idx}",
-                )
-                flight_number = b.text_input(
-                    "Número de vuelo",
-                    key=f"flight_number_{quote_id}_{idx}",
-                    placeholder="Ej. AM 001",
-                )
-                default_type = "IDA" if idx < max(int(segment_count) - 1, 1) else "REGRESO"
-                segment_type = c.selectbox(
-                    "Tipo de tramo",
-                    ["IDA", "REGRESO", "INTERNO"],
-                    index=["IDA", "REGRESO", "INTERNO"].index(default_type),
-                    key=f"segment_type_{quote_id}_{idx}",
-                )
+        st.markdown("#### Vuelos")
+        journeys: list[dict[str, Any]] = []
+        for journey_index, label in enumerate(journey_labels, start=1):
+            segment_total = stop_counts[label] + 1
+            friendly = label.replace("_", " ").title()
+            st.markdown(f"### {friendly}")
+            st.caption(
+                "Directo" if stop_counts[label] == 0 else f"{stop_counts[label]} escala" + ("s" if stop_counts[label] > 1 else "")
+            )
+            journey_segments: list[dict[str, Any]] = []
+            for segment_index in range(segment_total):
+                with st.expander(
+                    f"Vuelo {segment_index + 1} de {segment_total} · {friendly}",
+                    expanded=True,
+                ):
+                    a, b = st.columns([1.45, 1])
+                    airline_label = a.selectbox(
+                        "Aerolínea *",
+                        airline_labels,
+                        key=f"airline_{quote_id}_{label}_{segment_index}",
+                    )
+                    flight_number = b.text_input(
+                        "Número de vuelo",
+                        key=f"flight_number_{quote_id}_{label}_{segment_index}",
+                        placeholder="Ej. AM 001",
+                    )
 
-                d, e, f, g = st.columns(4)
-                origin_iata = d.text_input(
-                    "Origen IATA *",
-                    key=f"origin_{quote_id}_{idx}",
-                    max_chars=3,
-                    placeholder="MEX",
-                )
-                destination_iata = e.text_input(
-                    "Destino IATA *",
-                    key=f"destination_{quote_id}_{idx}",
-                    max_chars=3,
-                    placeholder="MAD",
-                )
-                departure_date = f.date_input(
-                    "Fecha de salida *",
-                    value=None,
-                    key=f"departure_date_{quote_id}_{idx}",
-                )
-                arrival_date = g.date_input(
-                    "Fecha de llegada *",
-                    value=None,
-                    key=f"arrival_date_{quote_id}_{idx}",
-                )
+                    d, e, f, g = st.columns(4)
+                    origin_iata = d.text_input(
+                        "Origen IATA *",
+                        key=f"origin_{quote_id}_{label}_{segment_index}",
+                        max_chars=3,
+                        placeholder="MEX",
+                    )
+                    destination_iata = e.text_input(
+                        "Destino IATA *",
+                        key=f"destination_{quote_id}_{label}_{segment_index}",
+                        max_chars=3,
+                        placeholder="YYZ",
+                    )
+                    departure_date = f.date_input(
+                        "Fecha de salida *",
+                        value=None,
+                        key=f"departure_date_{quote_id}_{label}_{segment_index}",
+                    )
+                    arrival_date = g.date_input(
+                        "Fecha de llegada *",
+                        value=None,
+                        key=f"arrival_date_{quote_id}_{label}_{segment_index}",
+                    )
 
-                h, i, j = st.columns([1, 1, 1.45])
-                departure_time = h.time_input(
-                    "Hora de salida",
-                    value=time(8, 0),
-                    key=f"departure_time_{quote_id}_{idx}",
-                )
-                arrival_time = i.time_input(
-                    "Hora de llegada",
-                    value=time(12, 0),
-                    key=f"arrival_time_{quote_id}_{idx}",
-                )
-                provider_label = j.selectbox(
-                    "Proveedor de compra *",
-                    provider_labels,
-                    key=f"provider_{quote_id}_{idx}",
-                )
+                    h, i = st.columns(2)
+                    departure_time = h.time_input(
+                        "Hora de salida",
+                        value=time(8, 0),
+                        key=f"departure_time_{quote_id}_{label}_{segment_index}",
+                    )
+                    arrival_time = i.time_input(
+                        "Hora de llegada",
+                        value=time(12, 0),
+                        key=f"arrival_time_{quote_id}_{label}_{segment_index}",
+                    )
 
-                k, l, m = st.columns(3)
-                cabin = k.selectbox(
-                    "Cabina",
-                    ["TURISTA", "TURISTA_PREMIUM", "BUSINESS", "PRIMERA", ""],
-                    key=f"cabin_{quote_id}_{idx}",
-                )
-                fare = l.text_input(
-                    "Tarifa",
-                    key=f"fare_{quote_id}_{idx}",
-                    placeholder="Ej. Light / Classic",
-                )
-                baggage = m.text_input(
-                    "Equipaje incluido",
-                    key=f"baggage_{quote_id}_{idx}",
-                    placeholder="Ej. 1 maleta de 23 kg",
-                )
+                    st.caption("Tarifa y equipaje")
+                    k, l, m = st.columns(3)
+                    cabin = k.selectbox(
+                        "Cabina",
+                        ["TURISTA", "TURISTA_PREMIUM", "BUSINESS", "PRIMERA", ""],
+                        key=f"cabin_{quote_id}_{label}_{segment_index}",
+                    )
+                    fare = l.text_input(
+                        "Tarifa",
+                        key=f"fare_{quote_id}_{label}_{segment_index}",
+                        placeholder="Ej. Light / Classic",
+                    )
+                    baggage = m.text_input(
+                        "Equipaje incluido",
+                        key=f"baggage_{quote_id}_{label}_{segment_index}",
+                        placeholder="Ej. 1 maleta de 23 kg",
+                    )
 
-                segments.append(
-                    {
-                        "airline_label": airline_label,
-                        "flight_number": flight_number,
-                        "segment_type": segment_type,
-                        "origin_iata": origin_iata,
-                        "destination_iata": destination_iata,
-                        "departure_date": departure_date,
-                        "arrival_date": arrival_date,
-                        "departure_time": departure_time,
-                        "arrival_time": arrival_time,
-                        "provider_label": provider_label,
-                        "cabin": cabin,
-                        "fare": fare,
-                        "baggage": baggage,
-                    }
-                )
+                    if segment_index < segment_total - 1:
+                        st.caption(
+                            "La llegada de este vuelo y la salida del siguiente definirán automáticamente "
+                            "el lugar y tiempo de la escala."
+                        )
+
+                    journey_segments.append(
+                        {
+                            "airline_label": airline_label,
+                            "flight_number": flight_number,
+                            "origin_iata": origin_iata,
+                            "destination_iata": destination_iata,
+                            "departure_date": departure_date,
+                            "arrival_date": arrival_date,
+                            "departure_time": departure_time,
+                            "arrival_time": arrival_time,
+                            "cabin": cabin,
+                            "fare": fare,
+                            "baggage": baggage,
+                        }
+                    )
+            journeys.append({"label": label, "segments": journey_segments})
 
         visible_notes = st.text_area(
             "Observaciones visibles para el cliente",
@@ -742,16 +891,31 @@ def create_flight_option_widget(
         st.warning("Captura un precio de venta por persona mayor a cero.")
         return
 
-    for idx, segment in enumerate(segments, start=1):
-        if not clean_text(segment["origin_iata"]) or not clean_text(segment["destination_iata"]):
-            st.warning(f"Completa origen y destino del segmento {idx}.")
-            return
-        if not segment["departure_date"] or not segment["arrival_date"]:
-            st.warning(f"Completa las fechas del segmento {idx}.")
-            return
-        if segment["arrival_date"] < segment["departure_date"]:
-            st.warning(f"La llegada del segmento {idx} no puede ser anterior a la salida.")
-            return
+    for journey in journeys:
+        for idx, segment in enumerate(journey["segments"], start=1):
+            if not clean_text(segment["origin_iata"]) or not clean_text(segment["destination_iata"]):
+                st.warning(f"Completa origen y destino del vuelo {idx} en {journey['label']}.")
+                return
+            if not segment["departure_date"] or not segment["arrival_date"]:
+                st.warning(f"Completa las fechas del vuelo {idx} en {journey['label']}.")
+                return
+            if segment["arrival_date"] < segment["departure_date"]:
+                st.warning(f"La llegada del vuelo {idx} en {journey['label']} no puede ser anterior a la salida.")
+                return
+        for idx in range(len(journey["segments"]) - 1):
+            current = journey["segments"][idx]
+            following = journey["segments"][idx + 1]
+            if clean_text(current["destination_iata"]).upper() != clean_text(following["origin_iata"]).upper():
+                st.warning(
+                    f"En {journey['label']}, el destino del vuelo {idx + 1} debe coincidir "
+                    f"con el origen del vuelo {idx + 2}."
+                )
+                return
+            arrival_dt = datetime.combine(current["arrival_date"], current["arrival_time"])
+            next_departure_dt = datetime.combine(following["departure_date"], following["departure_time"])
+            if next_departure_dt < arrival_dt:
+                st.warning(f"En {journey['label']}, la salida posterior a la escala ocurre antes de la llegada.")
+                return
 
     option_total_base = float(price_per_person) * int(displayed_passengers)
     estimated_cost = float(cost_per_person) * int(displayed_passengers)
@@ -776,49 +940,60 @@ def create_flight_option_widget(
     try:
         created_option = api.create_record("02_OPCIONES", option_data, actor_name=actor_name)
         option_id = str(created_option.get("OPCION_ID", ""))
+        overall_order = 0
 
-        for idx, segment in enumerate(segments, start=1):
-            airline = airline_map[segment["airline_label"]]
-            provider = provider_map[segment["provider_label"]]
-            origin_iata = clean_text(segment["origin_iata"]).upper()
-            destination_iata = clean_text(segment["destination_iata"]).upper()
-            origin_city = airport_map.get(origin_iata, {}).get("CIUDAD", "")
-            destination_city = airport_map.get(destination_iata, {}).get("CIUDAD", "")
+        for journey in journeys:
+            segments = journey["segments"]
+            scale_airports = [clean_text(item["destination_iata"]).upper() for item in segments[:-1]]
+            if trip_type == "Viaje sencillo":
+                segment_type = "IDA"
+            elif trip_type == "Viaje redondo":
+                segment_type = journey["label"]
+            else:
+                segment_type = "INTERNO"
 
-            api.create_record(
-                "04_VUELOS",
-                {
-                    "COTIZACION_ID": quote_id,
-                    "OPCION_ID": option_id,
-                    "TIPO_TRAMO": segment["segment_type"],
-                    "GRUPO_TRAMO": segment["segment_type"],
-                    "ORDEN_SEGMENTO": idx,
-                    "AEROLINEA_IATA": str(airline.get("IATA", "")),
-                    "NUMERO_VUELO": clean_text(segment["flight_number"]).upper(),
-                    "ORIGEN_IATA": origin_iata,
-                    "ORIGEN_CIUDAD": origin_city,
-                    "DESTINO_IATA": destination_iata,
-                    "DESTINO_CIUDAD": destination_city,
-                    "FECHA_SALIDA": iso(segment["departure_date"]),
-                    "HORA_SALIDA": time_text(segment["departure_time"]),
-                    "FECHA_LLEGADA": iso(segment["arrival_date"]),
-                    "HORA_LLEGADA": time_text(segment["arrival_time"]),
-                    "NUM_ESCALAS": max(int(segment_count) - 1, 0) if idx == 1 else 0,
-                    "ESCALAS_IATA": "",
-                    "CABINA": segment["cabin"],
-                    "TARIFA": clean_text(segment["fare"]),
-                    "EQUIPAJE": clean_text(segment["baggage"]),
-                    "REEMBOLSABLE": "NO",
-                    "CAMBIOS_PERMITIDOS": "NO",
-                    "PROVEEDOR_ID": str(provider.get("PROVEEDOR_ID", "")),
-                    "CANTIDAD_PASAJEROS": int(displayed_passengers),
-                    "MONEDA": currency,
-                    "IMPUESTOS_INCLUIDOS": "SI",
-                    "OBSERVACIONES_CLIENTE": clean_text(visible_notes),
-                    "ACTIVO": "SI",
-                },
-                actor_name=actor_name,
-            )
+            for idx, segment in enumerate(segments):
+                overall_order += 1
+                airline = airline_map[segment["airline_label"]]
+                origin_iata = clean_text(segment["origin_iata"]).upper()
+                destination_iata = clean_text(segment["destination_iata"]).upper()
+                origin_city = airport_map.get(origin_iata, {}).get("CIUDAD", "")
+                destination_city = airport_map.get(destination_iata, {}).get("CIUDAD", "")
+
+                api.create_record(
+                    "04_VUELOS",
+                    {
+                        "COTIZACION_ID": quote_id,
+                        "OPCION_ID": option_id,
+                        "TIPO_TRAMO": segment_type,
+                        "GRUPO_TRAMO": journey["label"],
+                        "ORDEN_SEGMENTO": overall_order,
+                        "AEROLINEA_IATA": str(airline.get("IATA", "")),
+                        "NUMERO_VUELO": clean_text(segment["flight_number"]).upper(),
+                        "ORIGEN_IATA": origin_iata,
+                        "ORIGEN_CIUDAD": origin_city,
+                        "DESTINO_IATA": destination_iata,
+                        "DESTINO_CIUDAD": destination_city,
+                        "FECHA_SALIDA": iso(segment["departure_date"]),
+                        "HORA_SALIDA": time_text(segment["departure_time"]),
+                        "FECHA_LLEGADA": iso(segment["arrival_date"]),
+                        "HORA_LLEGADA": time_text(segment["arrival_time"]),
+                        "NUM_ESCALAS": max(len(segments) - 1, 0) if idx == 0 else 0,
+                        "ESCALAS_IATA": ",".join(scale_airports) if idx == 0 else "",
+                        "CABINA": segment["cabin"],
+                        "TARIFA": clean_text(segment["fare"]),
+                        "EQUIPAJE": clean_text(segment["baggage"]),
+                        "REEMBOLSABLE": "NO",
+                        "CAMBIOS_PERMITIDOS": "NO",
+                        "PROVEEDOR_ID": "",
+                        "CANTIDAD_PASAJEROS": int(displayed_passengers),
+                        "MONEDA": currency,
+                        "IMPUESTOS_INCLUIDOS": "SI",
+                        "OBSERVACIONES_CLIENTE": clean_text(visible_notes),
+                        "ACTIVO": "SI",
+                    },
+                    actor_name=actor_name,
+                )
 
         if recommended:
             try:
@@ -840,6 +1015,226 @@ def create_flight_option_widget(
 
     clear_app_cache()
     st.session_state["eva_flash"] = f"Opción de vuelo guardada: {option_id}"
+    st.rerun()
+
+
+def render_hotels(bundle: dict[str, Any], quote: dict[str, Any]) -> None:
+    hotels = bundle.get("hospedajes", [])
+    currency = str(quote.get("MONEDA") or "MXN")
+    if not hotels:
+        st.info("Todavía no hay hospedajes registrados en esta cotización.")
+        return
+
+    for hotel in hotels:
+        with st.container(border=True):
+            image_url = str(hotel.get("IMAGEN_URL") or "").strip()
+            info_col, price_col = st.columns([3.2, 1.15], vertical_alignment="top")
+            with info_col:
+                if image_url:
+                    image_col, text_col = st.columns([1.15, 2.35], vertical_alignment="top")
+                    with image_col:
+                        try:
+                            st.image(image_url, use_container_width=True)
+                        except Exception:
+                            st.caption("No fue posible cargar la fotografía.")
+                    target_col = text_col
+                else:
+                    target_col = st.container()
+
+                with target_col:
+                    st.markdown(f"### {hotel.get('HOTEL_NOMBRE', 'Hospedaje')}")
+                    location = ", ".join(
+                        item for item in [str(hotel.get("CIUDAD") or ""), str(hotel.get("PAIS") or "")] if item
+                    )
+                    if location:
+                        st.caption(location)
+                    if hotel.get("DIRECCION"):
+                        st.write(str(hotel.get("DIRECCION")))
+                    st.write(
+                        f"**Estancia:** {hotel.get('CHECKIN', '')} → {hotel.get('CHECKOUT', '')} "
+                        f"· {hotel.get('NOCHES', '') or '—'} noches"
+                    )
+                    st.write(
+                        f"**Habitación:** {hotel.get('TIPO_HABITACION', 'Sin especificar')} "
+                        f"· {hotel.get('OCUPACION', 'Ocupación pendiente')}"
+                    )
+                    if hotel.get("PLAN_ALIMENTOS"):
+                        st.write(f"**Plan de alimentos:** {hotel.get('PLAN_ALIMENTOS')}")
+            with price_col:
+                st.metric("Precio total", money(hotel.get("PRECIO_VENTA_TOTAL"), currency))
+                st.caption(f"{hotel.get('NUM_HABITACIONES', 1)} habitación(es)")
+
+            map_url = str(hotel.get("MAPA_URL") or "").strip()
+            if map_url:
+                with st.expander("Ver ubicación del hotel"):
+                    show_simple_map(map_url)
+
+
+def create_hotel_widget(
+    api: EvaApi,
+    actor_name: str,
+    quote: dict[str, Any],
+    bundle: dict[str, Any],
+) -> None:
+    quote_id = str(quote.get("COTIZACION_ID", ""))
+    currency = str(quote.get("MONEDA") or "MXN")
+    options = sorted(bundle.get("opciones", []), key=lambda row: integer(row.get("ORDEN"), 999))
+    option_choices = {"Todas las opciones de la cotización": "GLOBAL"}
+    for option in options:
+        option_choices[f"{option.get('NOMBRE_OPCION', 'Opción')} · {option.get('OPCION_ID', '')}"] = str(
+            option.get("OPCION_ID", "")
+        )
+
+    key_prefix = f"hotel_{quote_id}"
+    applies_label = st.selectbox(
+        "¿A qué opción aplica?",
+        list(option_choices),
+        key=f"{key_prefix}_applies",
+    )
+
+    c1, c2, c3 = st.columns([2.1, 1.2, 1.2])
+    hotel_name = c1.text_input("Nombre del hotel *", key=f"{key_prefix}_name")
+    city = c2.text_input("Ciudad *", key=f"{key_prefix}_city")
+    country = c3.text_input("País", key=f"{key_prefix}_country")
+    address = st.text_input(
+        "Dirección del hotel",
+        key=f"{key_prefix}_address",
+        placeholder="Ej. Calle, número, colonia o zona",
+    )
+
+    c4, c5 = st.columns(2)
+    image_url = c4.text_input(
+        "URL de la fotografía",
+        key=f"{key_prefix}_image",
+        placeholder="https://...",
+    )
+    map_url = c5.text_input(
+        "URL de Google Maps",
+        key=f"{key_prefix}_map",
+        placeholder="Pega el vínculo de Compartir → Copiar vínculo",
+    )
+
+    if image_url:
+        if is_http_url(image_url):
+            try:
+                st.image(image_url, caption="Vista previa de la fotografía", width=360)
+            except Exception:
+                st.caption("La fotografía se guardará, aunque la vista previa no pudo cargarse.")
+        else:
+            st.warning("La URL de la fotografía debe comenzar con http:// o https://")
+
+    if map_url:
+        if is_http_url(map_url):
+            with st.expander("Vista previa de la ubicación", expanded=True):
+                show_simple_map(map_url)
+        else:
+            st.warning("La URL de Google Maps debe comenzar con http:// o https://")
+
+    c6, c7 = st.columns(2)
+    checkin = c6.date_input("Check-in *", value=None, key=f"{key_prefix}_checkin")
+    checkout = c7.date_input("Check-out *", value=None, key=f"{key_prefix}_checkout")
+
+    c8, c9, c10 = st.columns([1.7, 1.2, 1])
+    room_type = c8.text_input("Tipo de habitación", key=f"{key_prefix}_room")
+    occupancy = c9.text_input("Ocupación", key=f"{key_prefix}_occupancy", placeholder="Ej. 2 adultos")
+    room_count = c10.number_input(
+        "Habitaciones",
+        min_value=1,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_room_count",
+    )
+
+    meal_plan = st.text_input(
+        "Plan de alimentos",
+        key=f"{key_prefix}_meal",
+        placeholder="Ej. Desayuno incluido / Solo alojamiento",
+    )
+    cancellation = st.text_area(
+        "Política de cancelación",
+        key=f"{key_prefix}_cancellation",
+        placeholder="Resume la política que debe conocer el cliente.",
+    )
+
+    c11, c12 = st.columns([1.4, 1])
+    price_total = c11.number_input(
+        f"Precio total al cliente ({currency}) *",
+        min_value=0.0,
+        value=0.0,
+        step=100.0,
+        format="%.2f",
+        key=f"{key_prefix}_price",
+    )
+    taxes_included = c12.checkbox("Impuestos incluidos", value=True, key=f"{key_prefix}_taxes")
+
+    visible_notes = st.text_area(
+        "Observaciones visibles para el cliente",
+        key=f"{key_prefix}_visible_notes",
+    )
+    with st.expander("Notas internas"):
+        internal_notes = st.text_area("Notas internas del hospedaje", key=f"{key_prefix}_internal_notes")
+
+    submitted = st.button(
+        "Guardar hospedaje",
+        type="primary",
+        use_container_width=True,
+        key=f"{key_prefix}_submit",
+    )
+    if not submitted:
+        return
+
+    if not clean_text(hotel_name) or not clean_text(city):
+        st.warning("El nombre del hotel y la ciudad son obligatorios.")
+        return
+    if not checkin or not checkout:
+        st.warning("Captura check-in y check-out.")
+        return
+    if checkout <= checkin:
+        st.warning("El check-out debe ser posterior al check-in.")
+        return
+    if price_total <= 0:
+        st.warning("Captura un precio total mayor a cero.")
+        return
+    if image_url and not is_http_url(image_url):
+        st.warning("Corrige la URL de la fotografía.")
+        return
+    if map_url and not is_http_url(map_url):
+        st.warning("Corrige la URL de Google Maps.")
+        return
+
+    hotel_data = {
+        "COTIZACION_ID": quote_id,
+        "OPCION_ID": option_choices[applies_label],
+        "HOTEL_NOMBRE": clean_text(hotel_name),
+        "CIUDAD": clean_text(city),
+        "PAIS": clean_text(country),
+        "DIRECCION": clean_text(address),
+        "CHECKIN": iso(checkin),
+        "CHECKOUT": iso(checkout),
+        "TIPO_HABITACION": clean_text(room_type),
+        "OCUPACION": clean_text(occupancy),
+        "NUM_HABITACIONES": int(room_count),
+        "PLAN_ALIMENTOS": clean_text(meal_plan),
+        "POLITICA_CANCELACION": clean_text(cancellation),
+        "PROVEEDOR_ID": "",
+        "IMAGEN_URL": str(image_url or "").strip(),
+        "MAPA_URL": str(map_url or "").strip(),
+        "MONEDA": currency,
+        "PRECIO_VENTA_TOTAL": float(price_total),
+        "IMPUESTOS_INCLUIDOS": "SI" if taxes_included else "NO",
+        "OBSERVACIONES_CLIENTE": clean_text(visible_notes),
+        "OBSERVACIONES_INTERNAS": clean_text(internal_notes),
+        "ACTIVO": "SI",
+    }
+
+    try:
+        created = api.create_record("05_HOSPEDAJES", hotel_data, actor_name=actor_name)
+    except EvaApiError as exc:
+        st.error(str(exc))
+        return
+
+    clear_app_cache()
+    st.session_state["eva_flash"] = f"Hospedaje guardado: {created.get('HOSPEDAJE_ITEM_ID', '')}"
     st.rerun()
 
 
@@ -914,7 +1309,11 @@ def page_quotes(api: EvaApi, actor_name: str, bootstrap: dict[str, Any]) -> None
             create_flight_option_widget(api, actor_name, bootstrap, selected, bundle)
 
     with tab_hotels:
-        st.info("El módulo de hospedajes será el siguiente. Usará la misma lógica: tarjetas y varias alternativas.")
+        st.markdown("### Hospedajes guardados")
+        render_hotels(bundle, selected)
+        st.divider()
+        with st.expander("+ Agregar hospedaje", expanded=not bool(bundle.get("hospedajes"))):
+            create_hotel_widget(api, actor_name, selected, bundle)
 
     with tab_services:
         st.info("Después agregaremos traslados, seguros, equipaje, tours y otros servicios como bloques sencillos.")
