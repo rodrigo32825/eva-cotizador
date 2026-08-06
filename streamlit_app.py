@@ -293,7 +293,7 @@ def show_header() -> None:
             <div class="eva-hero">
               <div class="eva-kicker">Proyecto EVA</div>
               <div class="eva-title">Cotizador y control de viajes</div>
-              <div class="eva-subtle">Enterprise Resource Planning</div>
+              <div class="eva-subtle">Cotizaciones claras, editables y conectadas con Google Sheets.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -716,6 +716,24 @@ def create_flight_option_widget(
             stop_counts[label] = 0
 
     airline_labels = list(airline_map)
+    airport_label_map = {
+        " · ".join(
+            part
+            for part in [
+                str(row.get("IATA", "")).upper(),
+                str(row.get("CIUDAD", "")).strip(),
+                str(row.get("PAIS", "")).strip(),
+                str(row.get("NOMBRE_AEROPUERTO", "")).strip(),
+            ]
+            if part
+        ): row
+        for row in airport_map.values()
+    }
+    airport_labels = sorted(airport_label_map, key=lambda item: item.lower())
+
+    if not airport_labels:
+        st.warning("No hay aeropuertos activos en 11_CAT_AEROPUERTOS.")
+        return
 
     with st.form(f"flight_option_form_{quote_id}", clear_on_submit=False):
         st.markdown("#### Datos de la opción")
@@ -795,17 +813,21 @@ def create_flight_option_widget(
                     )
 
                     d, e, f, g = st.columns(4)
-                    origin_iata = d.text_input(
-                        "Origen IATA *",
+                    origin_label = d.selectbox(
+                        "Origen *",
+                        airport_labels,
+                        index=None,
                         key=f"origin_{quote_id}_{label}_{segment_index}",
-                        max_chars=3,
-                        placeholder="MEX",
+                        placeholder="Escribe ciudad, aeropuerto o IATA",
+                        help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
-                    destination_iata = e.text_input(
-                        "Destino IATA *",
+                    destination_label = e.selectbox(
+                        "Destino *",
+                        airport_labels,
+                        index=None,
                         key=f"destination_{quote_id}_{label}_{segment_index}",
-                        max_chars=3,
-                        placeholder="YYZ",
+                        placeholder="Escribe ciudad, aeropuerto o IATA",
+                        help="Puedes buscar por código IATA, ciudad, país o nombre del aeropuerto.",
                     )
                     departure_date = f.date_input(
                         "Fecha de salida *",
@@ -854,12 +876,15 @@ def create_flight_option_widget(
                             "el lugar y tiempo de la escala."
                         )
 
+                    origin_airport = airport_label_map.get(origin_label, {}) if origin_label else {}
+                    destination_airport = airport_label_map.get(destination_label, {}) if destination_label else {}
+
                     journey_segments.append(
                         {
                             "airline_label": airline_label,
                             "flight_number": flight_number,
-                            "origin_iata": origin_iata,
-                            "destination_iata": destination_iata,
+                            "origin_iata": str(origin_airport.get("IATA", "")).upper(),
+                            "destination_iata": str(destination_airport.get("IATA", "")).upper(),
                             "departure_date": departure_date,
                             "arrival_date": arrival_date,
                             "departure_time": departure_time,
