@@ -293,7 +293,7 @@ def show_header() -> None:
             <div class="eva-hero">
               <div class="eva-kicker">Proyecto EVA</div>
               <div class="eva-title">Cotizador y control de viajes</div>
-              <div class="eva-subtle">Cotizaciones claras, editables y conectadas con Google Sheets.</div>
+              <div class="eva-subtle">Enterprise Resource Planning</div>
             </div>
             """,
             unsafe_allow_html=True,
