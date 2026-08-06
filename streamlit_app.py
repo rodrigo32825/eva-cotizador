@@ -31,7 +31,16 @@ st.markdown(
       .sive-card {border: 1px solid var(--eva-border); border-radius: 20px; padding: 1rem 1.1rem; background: #fff; margin-bottom: .8rem;}
       .sive-card-title {font-size: 1.05rem; font-weight: 700; color: var(--eva-text);}
       .sive-card-text {color: var(--eva-muted); margin-top: .25rem;}
-      div[data-testid="stButton"] > button {min-height: 48px; border-radius: 14px; font-weight: 600;}
+      div[data-testid="stButton"] > button {
+        min-height: 74px;
+        border-radius: 18px;
+        font-weight: 650;
+        text-align: left;
+        justify-content: flex-start;
+        white-space: pre-line;
+        padding: .9rem 1rem;
+      }
+      div[data-testid="stButton"] > button p {line-height: 1.35;}
       div[data-testid="stMetric"] {border: 1px solid var(--eva-border); border-radius: 16px; padding: .8rem 1rem; background: white;}
       @media (max-width: 700px) {
         .block-container {padding-left: .8rem; padding-right: .8rem; padding-top: .7rem;}
@@ -104,28 +113,42 @@ def section_card(title: str, text: str) -> None:
 
 
 def page_home() -> None:
-    st.markdown("## ¿Qué necesitas hacer?")
-    c1, c2 = st.columns(2)
-    with c1:
-        section_card("Nueva cotización", "Crea una propuesta de viaje paso a paso.")
-        if st.button("Crear cotización", use_container_width=True, type="primary"):
-            go("Nueva cotización")
-    with c2:
-        section_card("Abrir cotización", "Busca por pasajero, destino o folio.")
-        if st.button("Buscar cotización", use_container_width=True):
-            go("Abrir cotización")
-    c3, c4 = st.columns(2)
-    with c3:
-        section_card("Pasajeros", "Consulta o actualiza los datos de viajeros.")
-        if st.button("Ver pasajeros", use_container_width=True):
-            go("Pasajeros")
-    with c4:
-        section_card("Ventas y reportes", "Consulta ventas, cargos y rentabilidad.")
-        if st.button("Ver reportes", use_container_width=True):
-            go("Ventas y reportes")
+    st.markdown("## Menú principal")
+    st.caption("Selecciona la tarea que deseas realizar.")
 
+    if st.button(
+        "👤  Viajeros\nAlta, consulta y edición",
+        use_container_width=True,
+        key="home_travelers",
+    ):
+        go("Viajeros")
+
+    if st.button(
+        "✈️  Nueva cotización\nCrear una propuesta de viaje",
+        use_container_width=True,
+        type="primary",
+        key="home_new_quote",
+    ):
+        go("Nueva cotización")
+
+    if st.button(
+        "📄  Abrir cotización\nConsultar, editar o generar PDF",
+        use_container_width=True,
+        key="home_open_quote",
+    ):
+        go("Abrir cotización")
+
+    if st.button(
+        "📊  Ventas\nRevisar ventas, cargos y rentabilidad",
+        use_container_width=True,
+        key="home_sales",
+    ):
+        go("Ventas")
 
 def page_new_quote() -> None:
+    if st.button("← Volver al inicio", key="back_new_quote"):
+        go("Inicio")
+
     draft = st.session_state.draft
     st.markdown("## Nueva cotización")
     st.caption("Todo se conserva localmente hasta que decidas guardar.")
@@ -257,6 +280,9 @@ def page_new_quote() -> None:
 
 
 def page_open_quote() -> None:
+    if st.button("← Volver al inicio", key="back_open_quote"):
+        go("Inicio")
+
     st.markdown("## Abrir cotización")
     query = st.text_input("Buscar", placeholder="Nombre del pasajero, destino o folio")
     filters = st.radio("Estatus", ["Todas", "Borradores", "Enviadas", "Vendidas", "Recientes"], horizontal=True)
@@ -272,19 +298,24 @@ def page_open_quote() -> None:
 
 
 def page_passengers() -> None:
-    st.markdown("## Pasajeros")
-    st.text_input("Buscar pasajero", placeholder="Nombre, correo o teléfono")
+    if st.button("← Volver al inicio", key="back_travelers"):
+        go("Inicio")
+
+    st.markdown("## Viajeros")
+    st.text_input("Buscar viajero", placeholder="Nombre, correo o teléfono")
     st.info("La búsqueda y edición se conectarán en una fase posterior.")
 
 
 def page_reports() -> None:
-    st.markdown("## Ventas y reportes")
+    if st.button("← Volver al inicio", key="back_sales"):
+        go("Inicio")
+
+    st.markdown("## Ventas")
     st.info("Esta sección se conectará después de estabilizar el flujo de cotización.")
 
 
 def main() -> None:
     header()
-    top_navigation()
     page = st.session_state.page
     if page == "Inicio":
         page_home()
@@ -292,10 +323,12 @@ def main() -> None:
         page_new_quote()
     elif page == "Abrir cotización":
         page_open_quote()
-    elif page == "Pasajeros":
+    elif page == "Viajeros":
         page_passengers()
-    else:
+    elif page == "Ventas":
         page_reports()
+    else:
+        page_home()
 
 
 if __name__ == "__main__":
