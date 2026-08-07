@@ -467,11 +467,155 @@ def page_new_quote() -> None:
 
         if "Hospedaje" in draft["componentes"]:
             st.markdown("#### Hospedaje")
-            st.text_input("Nombre del hotel")
-            st.text_input("Ciudad")
-            c1, c2 = st.columns(2)
-            c1.date_input("Entrada", value=None)
-            c2.date_input("Salida", value=None)
+
+            hotel_name = st.text_input(
+                "Nombre del hotel *",
+                placeholder="Ej. JW Marriott Hotel Lima",
+                key="hotel_name_1",
+            )
+
+            city_col, room_col = st.columns([1.3, 1])
+            hotel_city = city_col.text_input(
+                "Ciudad o destino *",
+                placeholder="Ej. Lima",
+                key="hotel_city_1",
+            )
+            room_type = room_col.text_input(
+                "Tipo de habitación",
+                placeholder="Ej. Deluxe King",
+                key="hotel_room_type_1",
+            )
+
+            st.caption("Estancia")
+            checkin_col, checkout_col = st.columns(2)
+            checkin = checkin_col.date_input(
+                "Entrada *",
+                value=None,
+                key="hotel_checkin_1",
+            )
+            checkout = checkout_col.date_input(
+                "Salida *",
+                value=None,
+                key="hotel_checkout_1",
+            )
+
+            if checkin and checkout:
+                nights = (checkout - checkin).days
+                if nights > 0:
+                    st.success(f"{nights} noche{'s' if nights != 1 else ''}")
+                else:
+                    st.warning("La fecha de salida debe ser posterior a la entrada.")
+                    nights = 0
+            else:
+                nights = 0
+
+            rooms_col, guests_col = st.columns(2)
+            rooms = rooms_col.number_input(
+                "Habitaciones",
+                min_value=1,
+                value=1,
+                step=1,
+                key="hotel_rooms_1",
+            )
+            guests = guests_col.number_input(
+                "Huéspedes",
+                min_value=1,
+                value=1,
+                step=1,
+                key="hotel_guests_1",
+            )
+
+            board_col, cancellation_col = st.columns(2)
+            board = board_col.selectbox(
+                "Alimentos incluidos",
+                [
+                    "Sin alimentos",
+                    "Desayuno incluido",
+                    "Media pensión",
+                    "Pensión completa",
+                    "Todo incluido",
+                    "Otro",
+                ],
+                key="hotel_board_1",
+            )
+            cancellation = cancellation_col.text_input(
+                "Política de cancelación",
+                placeholder="Ej. Cancelación gratuita hasta...",
+                key="hotel_cancellation_1",
+            )
+
+            st.caption("Precio")
+            price_col, currency_col = st.columns([1.4, 1])
+            hotel_price = price_col.number_input(
+                "Precio total mostrado",
+                min_value=0.0,
+                step=100.0,
+                key="hotel_price_1",
+            )
+            hotel_currency = currency_col.selectbox(
+                "Moneda",
+                ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                key="hotel_currency_1",
+            )
+
+            if nights > 0 and hotel_price > 0:
+                average_night = hotel_price / nights
+                st.info(
+                    f"Promedio por noche: ${average_night:,.2f} {hotel_currency}"
+                )
+
+            st.caption("Imagen del hotel")
+            hotel_image = st.file_uploader(
+                "Adjuntar imagen",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="hotel_image_1",
+            )
+            hotel_image_url = st.text_input(
+                "O pega el enlace de una imagen",
+                placeholder="https://...",
+                key="hotel_image_url_1",
+            )
+
+            if hotel_image is not None:
+                st.image(
+                    hotel_image,
+                    caption=hotel_name or "Vista previa del hotel",
+                    use_container_width=True,
+                )
+            elif hotel_image_url:
+                try:
+                    st.image(
+                        hotel_image_url,
+                        caption=hotel_name or "Vista previa del hotel",
+                        use_container_width=True,
+                    )
+                except Exception:
+                    st.warning("No pudimos mostrar la imagen desde ese enlace.")
+
+            links_col1, links_col2 = st.columns(2)
+            hotel_url = links_col1.text_input(
+                "Página del hotel",
+                placeholder="https://...",
+                key="hotel_url_1",
+            )
+            map_url = links_col2.text_input(
+                "Ubicación en Maps",
+                placeholder="https://maps.google.com/...",
+                key="hotel_map_url_1",
+            )
+
+            hotel_notes = st.text_area(
+                "Condiciones y observaciones",
+                placeholder="Incluye impuestos, resort fee, horarios de check-in, etc.",
+                key="hotel_notes_1",
+            )
+
+            st.button(
+                "+ Agregar otra opción de hospedaje",
+                use_container_width=True,
+                key="add_hotel_option",
+            )
+
         other_services = [item for item in draft["componentes"] if item not in {"Vuelos", "Hospedaje"}]
         if other_services:
             st.markdown("#### Servicios adicionales")
