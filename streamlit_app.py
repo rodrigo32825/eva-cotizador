@@ -616,13 +616,348 @@ def page_new_quote() -> None:
                 key="add_hotel_option",
             )
 
-        other_services = [item for item in draft["componentes"] if item not in {"Vuelos", "Hospedaje"}]
+        other_services = [
+            item
+            for item in draft["componentes"]
+            if item not in {"Vuelos", "Hospedaje"}
+        ]
+
         if other_services:
             st.markdown("#### Servicios adicionales")
+            st.caption("Solo verás los campos necesarios para cada servicio.")
+
             for service in other_services:
-                with st.expander(service, expanded=True):
-                    st.text_input("Descripción", key=f"desc_{service}")
-                    st.number_input("Precio (MXN)", min_value=0.0, step=100.0, key=f"price_{service}")
+                if service == "Seguro de viaje":
+                    with st.expander("🛡️ Seguro de viaje", expanded=True):
+                        provider_col, plan_col = st.columns(2)
+                        provider_col.text_input(
+                            "Proveedor",
+                            placeholder="Ej. Assist Card",
+                            key="insurance_provider",
+                        )
+                        plan_col.text_input(
+                            "Plan",
+                            placeholder="Ej. AC 60",
+                            key="insurance_plan",
+                        )
+
+                        date_col1, date_col2 = st.columns(2)
+                        insurance_start = date_col1.date_input(
+                            "Inicio de cobertura",
+                            value=None,
+                            key="insurance_start",
+                        )
+                        insurance_end = date_col2.date_input(
+                            "Fin de cobertura",
+                            value=None,
+                            key="insurance_end",
+                        )
+
+                        if insurance_start and insurance_end:
+                            covered_days = (insurance_end - insurance_start).days + 1
+                            if covered_days > 0:
+                                st.info(
+                                    f"Cobertura: {covered_days} día"
+                                    f"{'s' if covered_days != 1 else ''}"
+                                )
+                            else:
+                                st.warning(
+                                    "La fecha de fin debe ser igual o posterior al inicio."
+                                )
+
+                        coverage_col, people_col = st.columns(2)
+                        coverage_col.text_input(
+                            "Cobertura principal",
+                            placeholder="Ej. USD 60,000 asistencia médica",
+                            key="insurance_coverage",
+                        )
+                        people_col.number_input(
+                            "Viajeros cubiertos",
+                            min_value=1,
+                            value=1,
+                            step=1,
+                            key="insurance_people",
+                        )
+
+                        price_col, currency_col = st.columns([1.4, 1])
+                        price_col.number_input(
+                            "Precio total",
+                            min_value=0.0,
+                            step=100.0,
+                            key="insurance_price",
+                        )
+                        currency_col.selectbox(
+                            "Moneda",
+                            ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                            key="insurance_currency",
+                        )
+
+                        st.text_area(
+                            "Condiciones u observaciones",
+                            placeholder="Ej. Deducible, restricciones, coberturas relevantes...",
+                            key="insurance_notes",
+                        )
+
+                elif service == "Traslados":
+                    with st.expander("🚐 Traslado", expanded=True):
+                        transfer_type = st.selectbox(
+                            "Tipo de traslado",
+                            [
+                                "Aeropuerto → Hotel",
+                                "Hotel → Aeropuerto",
+                                "Aeropuerto → Hotel → Aeropuerto",
+                                "Punto a punto",
+                                "Otro",
+                            ],
+                            key="transfer_type",
+                        )
+
+                        origin_col, destination_col = st.columns(2)
+                        origin_col.text_input(
+                            "Origen",
+                            placeholder="Ej. Aeropuerto de Lima",
+                            key="transfer_origin",
+                        )
+                        destination_col.text_input(
+                            "Destino",
+                            placeholder="Ej. JW Marriott Lima",
+                            key="transfer_destination",
+                        )
+
+                        date_col, time_col = st.columns(2)
+                        date_col.date_input(
+                            "Fecha",
+                            value=None,
+                            key="transfer_date",
+                        )
+                        time_col.time_input(
+                            "Hora",
+                            value=time(12, 0),
+                            key="transfer_time",
+                        )
+
+                        provider_col, people_col = st.columns(2)
+                        provider_col.text_input(
+                            "Proveedor",
+                            placeholder="Opcional",
+                            key="transfer_provider",
+                        )
+                        people_col.number_input(
+                            "Pasajeros",
+                            min_value=1,
+                            value=1,
+                            step=1,
+                            key="transfer_people",
+                        )
+
+                        price_col, currency_col = st.columns([1.4, 1])
+                        price_col.number_input(
+                            "Precio total",
+                            min_value=0.0,
+                            step=100.0,
+                            key="transfer_price",
+                        )
+                        currency_col.selectbox(
+                            "Moneda",
+                            ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                            key="transfer_currency",
+                        )
+
+                        st.text_area(
+                            "Indicaciones u observaciones",
+                            placeholder="Ej. Chofer espera con letrero a nombre del pasajero...",
+                            key="transfer_notes",
+                        )
+
+                elif service == "Tours o actividades":
+                    with st.expander("🎟️ Tour o actividad", expanded=True):
+                        st.text_input(
+                            "Nombre del tour o actividad *",
+                            placeholder="Ej. Tour de día completo a Machu Picchu",
+                            key="tour_name",
+                        )
+
+                        city_col, provider_col = st.columns(2)
+                        city_col.text_input(
+                            "Ciudad o destino",
+                            placeholder="Ej. Cusco",
+                            key="tour_city",
+                        )
+                        provider_col.text_input(
+                            "Proveedor",
+                            placeholder="Opcional",
+                            key="tour_provider",
+                        )
+
+                        date_col, time_col = st.columns(2)
+                        date_col.date_input(
+                            "Fecha",
+                            value=None,
+                            key="tour_date",
+                        )
+                        time_col.time_input(
+                            "Hora",
+                            value=time(9, 0),
+                            key="tour_time",
+                        )
+
+                        duration_col, people_col = st.columns(2)
+                        duration_col.text_input(
+                            "Duración",
+                            placeholder="Ej. 8 horas",
+                            key="tour_duration",
+                        )
+                        people_col.number_input(
+                            "Participantes",
+                            min_value=1,
+                            value=1,
+                            step=1,
+                            key="tour_people",
+                        )
+
+                        st.text_area(
+                            "Incluye",
+                            placeholder="Ej. Guía, entradas, transporte, alimentos...",
+                            key="tour_includes",
+                        )
+
+                        price_col, currency_col = st.columns([1.4, 1])
+                        price_col.number_input(
+                            "Precio total",
+                            min_value=0.0,
+                            step=100.0,
+                            key="tour_price",
+                        )
+                        currency_col.selectbox(
+                            "Moneda",
+                            ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                            key="tour_currency",
+                        )
+
+                        st.text_area(
+                            "Condiciones u observaciones",
+                            placeholder="Punto de encuentro, restricciones, cancelación...",
+                            key="tour_notes",
+                        )
+
+                elif service == "Renta de auto":
+                    with st.expander("🚗 Renta de auto", expanded=True):
+                        company_col, car_col = st.columns(2)
+                        company_col.text_input(
+                            "Arrendadora",
+                            placeholder="Ej. Hertz",
+                            key="car_company",
+                        )
+                        car_col.text_input(
+                            "Categoría o vehículo",
+                            placeholder="Ej. SUV mediana",
+                            key="car_category",
+                        )
+
+                        pickup_col, return_col = st.columns(2)
+                        pickup_col.text_input(
+                            "Lugar de entrega",
+                            placeholder="Ej. Aeropuerto de Cancún",
+                            key="car_pickup_location",
+                        )
+                        return_col.text_input(
+                            "Lugar de devolución",
+                            placeholder="Ej. Aeropuerto de Cancún",
+                            key="car_return_location",
+                        )
+
+                        pickup_date_col, pickup_time_col = st.columns(2)
+                        pickup_date = pickup_date_col.date_input(
+                            "Fecha de entrega",
+                            value=None,
+                            key="car_pickup_date",
+                        )
+                        pickup_time_col.time_input(
+                            "Hora de entrega",
+                            value=time(12, 0),
+                            key="car_pickup_time",
+                        )
+
+                        return_date_col, return_time_col = st.columns(2)
+                        return_date = return_date_col.date_input(
+                            "Fecha de devolución",
+                            value=None,
+                            key="car_return_date",
+                        )
+                        return_time_col.time_input(
+                            "Hora de devolución",
+                            value=time(12, 0),
+                            key="car_return_time",
+                        )
+
+                        if pickup_date and return_date:
+                            rental_days = (return_date - pickup_date).days
+                            if rental_days >= 0:
+                                st.info(
+                                    f"Periodo: {rental_days + 1} día"
+                                    f"{'s' if rental_days + 1 != 1 else ''}"
+                                )
+                            else:
+                                st.warning(
+                                    "La devolución debe ser posterior a la entrega."
+                                )
+
+                        st.text_input(
+                            "Cobertura o seguro incluido",
+                            placeholder="Ej. CDW, responsabilidad civil...",
+                            key="car_coverage",
+                        )
+
+                        price_col, currency_col = st.columns([1.4, 1])
+                        price_col.number_input(
+                            "Precio total",
+                            min_value=0.0,
+                            step=100.0,
+                            key="car_price",
+                        )
+                        currency_col.selectbox(
+                            "Moneda",
+                            ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                            key="car_currency",
+                        )
+
+                        st.text_area(
+                            "Condiciones u observaciones",
+                            placeholder="Depósito, kilometraje, combustible, conductor adicional...",
+                            key="car_notes",
+                        )
+
+                elif service == "Otro servicio":
+                    with st.expander("➕ Otro servicio", expanded=True):
+                        st.text_input(
+                            "Nombre del servicio *",
+                            placeholder="Ej. Asistencia especial",
+                            key="other_service_name",
+                        )
+                        st.text_area(
+                            "Descripción",
+                            placeholder="Describe brevemente el servicio.",
+                            key="other_service_description",
+                        )
+
+                        price_col, currency_col = st.columns([1.4, 1])
+                        price_col.number_input(
+                            "Precio total",
+                            min_value=0.0,
+                            step=100.0,
+                            key="other_service_price",
+                        )
+                        currency_col.selectbox(
+                            "Moneda",
+                            ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                            key="other_service_currency",
+                        )
+
+                        st.text_area(
+                            "Condiciones u observaciones",
+                            key="other_service_notes",
+                        )
+
         b1, b2 = st.columns(2)
         if b1.button("Regresar", use_container_width=True):
             st.session_state.quote_step = 2
