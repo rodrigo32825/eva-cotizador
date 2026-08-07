@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from datetime import time
+from io import BytesIO
 from typing import Any
 
 import streamlit as st
+
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        Image as RLImage,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
 
 st.set_page_config(
@@ -60,12 +79,15 @@ def init_state() -> None:
         "draft": {
             "modo_viajero": "Buscar viajero existente",
             "viajero_existente": "",
+            "capture_state": {},
+            "hotel_image_cache": None,
             "nombres": "",
             "apellido_paterno": "",
             "apellido_materno": "",
             "cliente_contacto": "",
             "correo": "",
             "telefono": "",
+            "num_viajeros": 1,
             "componentes": ["Vuelos"],
             "cargo_tipo": "Estándar",
             "cargo_texto": "Cargo por servicio",
@@ -115,6 +137,357 @@ def section_card(title: str, text: str) -> None:
     st.markdown(f'<div class="sive-card"><div class="sive-card-title">{title}</div><div class="sive-card-text">{text}</div></div>', unsafe_allow_html=True)
 
 
+
+def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError(
+            "La librería reportlab no está instalada. Agrega reportlab a requirements.txt."
+        )
+
+    buffer = BytesIO()
+
+    teal = colors.HexColor("#2F9FA3")
+    soft = colors.HexColor("#F1F8F8")
+    line = colors.HexColor("#D7E3E3")
+    text_color = colors.HexColor("#2F3437")
+    muted = colors.HexColor("#737B80")
+
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="SIVETitle",
+            fontName="Helvetica",
+            fontSize=19,
+            leading=21,
+            textColor=text_color,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVESection",
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            leading=13,
+            textColor=text_color,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVEBody",
+            fontName="Helvetica",
+            fontSize=8,
+            leading=10,
+            textColor=text_color,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVESmall",
+            fontName="Helvetica",
+            fontSize=6.8,
+            leading=8.2,
+            textColor=muted,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVEPrice",
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            leading=12.5,
+            textColor=teal,
+            alignment=TA_RIGHT,
+        )
+    )
+
+    def P(value, style="SIVEBody"):
+        return Paragraph(str(value or "—"), styles[style])
+
+    if draft.get("modo_viajero") == "Buscar viajero existente":
+        traveler = draft.get("viajero_existente") or "Viajero"
+    else:
+        traveler = " ".join(
+            x
+            for x in [
+                draft.get("nombres", ""),
+                draft.get("apellido_paterno", ""),
+                draft.get("apellido_materno", ""),
+            ]
+            if x
+        ) or "Viajero"
+
+    traveler_count = max(int(draft.get("num_viajeros", 1) or 1), 1)
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=14 * mm,
+        rightMargin=14 * mm,
+        topMargin=12 * mm,
+        bottomMargin=16 * mm,
+    )
+    story = []
+
+    header_table = Table(
+        [
+            [P("PROYECTO EVA", "SIVESection"), P("COTIZACIÓN DE VIAJE", "SIVETitle")],
+            [P("SIVE · Sistema Integral de Viajes EVA", "SIVESmall"), ""],
+            [P(f"Viajero principal: {traveler}", "SIVEBody"), P(f"Viajeros: {traveler_count}", "SIVEBody")],
+        ],
+        colWidths=[75 * mm, 100 * mm],
+    )
+    header_table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("LINEBELOW", (0, 1), (-1, 1), 0.6, line),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
+                ("TOPPADDING", (0, 2), (-1, 2), 6),
+            ]
+        )
+    )
+    story += [header_table, Spacer(1, 5 * mm)]
+
+    components = draft.get("componentes", [])
+
+    # Vuelos
+    if "Vuelos" in components:
+        story.append(P("Vuelos", "SIVESection"))
+        trip_type = captured_value("flight_trip_type", "Viaje sencillo")
+        flight_price = float(captured_value("flight_total_price", 0.0) or 0.0)
+        flight_currency = captured_value("flight_total_currency", "MXN")
+
+        rows = [[P("Tipo de viaje"), P(trip_type)]]
+
+        route_candidates = [
+            ("outbound_origin_1", "outbound_destination_1"),
+            ("multicity_origin_1", "multicity_destination_1"),
+        ]
+        for origin_key, dest_key in route_candidates:
+            origin = captured_value(origin_key, "")
+            dest = captured_value(dest_key, "")
+            if origin or dest:
+                rows.append([P("Ruta"), P(f"{origin or '—'} → {dest or '—'}")])
+                break
+
+        # Collect first few physical segments so the PDF is useful.
+        segment_rows = []
+        for prefix in ("outbound", "return", "multicity"):
+            for idx in range(1, 7):
+                airline = captured_value(f"{prefix}_airline_{idx}", "")
+                number = captured_value(f"{prefix}_number_{idx}", "")
+                origin = captured_value(f"{prefix}_origin_{idx}", "")
+                destination = captured_value(f"{prefix}_destination_{idx}", "")
+                dep_date = captured_value(f"{prefix}_departure_date_{idx}", None)
+                dep_time = captured_value(f"{prefix}_departure_time_{idx}", None)
+                arr_date = captured_value(f"{prefix}_arrival_date_{idx}", None)
+                arr_time = captured_value(f"{prefix}_arrival_time_{idx}", None)
+                baggage = captured_value(f"{prefix}_baggage_{idx}", "")
+
+                if not any([airline, number, origin, destination, dep_date, arr_date]):
+                    continue
+
+                dep_text = f"{dep_date or ''} {dep_time.strftime('%H:%M') if hasattr(dep_time, 'strftime') else dep_time or ''}".strip()
+                arr_text = f"{arr_date or ''} {arr_time.strftime('%H:%M') if hasattr(arr_time, 'strftime') else arr_time or ''}".strip()
+
+                segment_rows.append(
+                    [
+                        P(f"{airline} {number}".strip() or "Vuelo"),
+                        P(f"{origin or '—'} → {destination or '—'}"),
+                        P(f"{dep_text}<br/>{arr_text}", "SIVESmall"),
+                        P(baggage or "Equipaje no especificado", "SIVESmall"),
+                    ]
+                )
+
+        if segment_rows:
+            seg_table = Table(
+                [[P("Vuelo", "SIVESmall"), P("Ruta", "SIVESmall"), P("Salida / llegada", "SIVESmall"), P("Equipaje", "SIVESmall")]]
+                + segment_rows,
+                colWidths=[37 * mm, 43 * mm, 53 * mm, 42 * mm],
+            )
+            seg_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), soft),
+                        ("BOX", (0, 0), (-1, -1), 0.5, line),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            story += [seg_table, Spacer(1, 2 * mm)]
+
+        rows.append(
+            [
+                P("Precio de la opción"),
+                P(f"{flight_currency} {flight_price:,.2f}" if flight_price else "Sin precio"),
+            ]
+        )
+
+        fee = float(captured_value("review_charge_total_flights", 0.0) or 0.0)
+        if fee:
+            rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
+
+        table = Table(rows, colWidths=[55 * mm, 120 * mm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.5, line),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story += [table, Spacer(1, 5 * mm)]
+
+    # Hospedaje
+    if "Hospedaje" in components:
+        story.append(P("Hospedaje", "SIVESection"))
+        hotel_name = captured_value("hotel_name_1", "")
+        city = captured_value("hotel_city_1", "")
+        checkin = captured_value("hotel_checkin_1", None)
+        checkout = captured_value("hotel_checkout_1", None)
+        hotel_price = float(captured_value("hotel_price_1", 0.0) or 0.0)
+        hotel_currency = captured_value("hotel_currency_1", "MXN")
+        room = captured_value("hotel_room_type_1", "")
+        board = captured_value("hotel_board_1", "")
+
+        nights = ""
+        if checkin and checkout:
+            diff = (checkout - checkin).days
+            if diff > 0:
+                nights = f"{diff} noche{'s' if diff != 1 else ''}"
+
+        hotel_rows = [
+            [P("Hotel"), P(hotel_name)],
+            [P("Destino"), P(city)],
+            [P("Habitación"), P(room)],
+            [P("Estancia"), P(f"{checkin or '—'} → {checkout or '—'} {('· ' + nights) if nights else ''}")],
+            [P("Alimentos"), P(board)],
+            [P("Precio"), P(f"{hotel_currency} {hotel_price:,.2f}" if hotel_price else "Sin precio")],
+        ]
+
+        fee = float(captured_value("review_charge_total_hotel", 0.0) or 0.0)
+        if fee:
+            hotel_rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
+
+        table = Table(hotel_rows, colWidths=[55 * mm, 120 * mm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.5, line),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story += [table]
+
+        # Compact hotel image when locally attached.
+        image_cache = draft.get("hotel_image_cache")
+        if image_cache and image_cache.get("bytes"):
+            try:
+                img_buffer = BytesIO(image_cache["bytes"])
+                img = RLImage(img_buffer, width=65 * mm, height=42 * mm)
+                story += [Spacer(1, 2 * mm), img]
+            except Exception:
+                pass
+
+        story.append(Spacer(1, 5 * mm))
+
+    # Simple service cards
+    service_specs = [
+        ("Seguro de viaje", "Seguro de viaje", "insurance_price", "insurance_currency", "review_charge_total_insurance"),
+        ("Traslados", "Traslado", "transfer_price", "transfer_currency", "review_charge_total_transfer"),
+        ("Renta de auto", "Renta de auto", "car_price", "car_currency", "review_charge_total_car"),
+        ("Tours o actividades", "Tour o actividad", "tour_price", "tour_currency", "review_charge_total_tour"),
+        ("Otro servicio", "Otro servicio", "other_service_price", "other_service_currency", "review_charge_total_other"),
+    ]
+
+    for component, title, price_key, currency_key, fee_key in service_specs:
+        if component not in components:
+            continue
+
+        price = float(captured_value(price_key, 0.0) or 0.0)
+        currency = captured_value(currency_key, "MXN")
+        fee = float(captured_value(fee_key, 0.0) or 0.0)
+
+        details = []
+        if component == "Seguro de viaje":
+            details = [
+                ("Proveedor", captured_value("insurance_provider", "")),
+                ("Plan", captured_value("insurance_plan", "")),
+                ("Cobertura", captured_value("insurance_coverage", "")),
+            ]
+        elif component == "Traslados":
+            details = [
+                ("Tipo", captured_value("transfer_type", "")),
+                ("Ruta", f"{captured_value('transfer_origin', '')} → {captured_value('transfer_destination', '')}"),
+            ]
+        elif component == "Renta de auto":
+            details = [
+                ("Arrendadora", captured_value("car_company", "")),
+                ("Vehículo", captured_value("car_category", "")),
+            ]
+        elif component == "Tours o actividades":
+            details = [
+                ("Actividad", captured_value("tour_name", "")),
+                ("Destino", captured_value("tour_city", "")),
+            ]
+        else:
+            details = [
+                ("Servicio", captured_value("other_service_name", "")),
+                ("Descripción", captured_value("other_service_description", "")),
+            ]
+
+        rows = [[P(label), P(value)] for label, value in details if value]
+        rows.append([P("Precio"), P(f"{currency} {price:,.2f}" if price else "Sin precio")])
+        if fee:
+            rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
+
+        story.append(P(title, "SIVESection"))
+        table = Table(rows, colWidths=[55 * mm, 120 * mm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.5, line),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story += [table, Spacer(1, 5 * mm)]
+
+    # Footer note
+    story.append(
+        P(
+            "Precios sujetos a disponibilidad y cambios sin previo aviso. "
+            "La cotización no representa una reservación hasta la confirmación correspondiente.",
+            "SIVESmall",
+        )
+    )
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
 def page_home() -> None:
     st.markdown("## Menú principal")
     st.caption("Selecciona la tarea que deseas realizar.")
@@ -153,6 +526,53 @@ def page_new_quote() -> None:
         go("Inicio")
 
     draft = st.session_state.draft
+    draft.setdefault("capture_state", {})
+    draft.setdefault("hotel_image_cache", None)
+
+    def is_capture_key(key: str) -> bool:
+        prefixes = (
+            "flight_",
+            "outbound_",
+            "return_",
+            "multicity_",
+            "hotel_",
+            "insurance_",
+            "transfer_",
+            "car_",
+            "tour_",
+            "other_service_",
+        )
+        return key == "multicity_segments" or key.startswith(prefixes)
+
+    def persist_capture_state() -> None:
+        """Copy the currently visible quote fields into durable draft memory."""
+        saved = draft["capture_state"]
+
+        for key, value in list(st.session_state.items()):
+            if not is_capture_key(str(key)):
+                continue
+
+            # Uploaded files need their bytes preserved separately.
+            if key == "hotel_image_1":
+                if value is not None:
+                    try:
+                        draft["hotel_image_cache"] = {
+                            "name": getattr(value, "name", "hotel.jpg"),
+                            "type": getattr(value, "type", "image/jpeg"),
+                            "bytes": value.getvalue(),
+                        }
+                    except Exception:
+                        pass
+                continue
+
+            saved[key] = value
+
+    def captured(key: str, default=None):
+        """Read a field from the live widget state or the durable draft."""
+        if key in st.session_state:
+            return st.session_state[key]
+        return draft["capture_state"].get(key, default)
+
     st.markdown("## Nueva cotización")
     st.caption("Todo se conserva localmente hasta que decidas guardar.")
     step = st.session_state.quote_step
@@ -288,6 +708,43 @@ def page_new_quote() -> None:
             st.rerun()
 
     elif step == 3:
+        # Streamlit removes widget state when a widget is no longer rendered.
+        # Restore the previously captured quote before showing the editor again.
+        explicit_default_tokens = (
+            "_departure_date_",
+            "_departure_time_",
+            "_arrival_date_",
+            "_arrival_time_",
+        )
+        explicit_default_keys = {
+            "hotel_checkin_1",
+            "hotel_checkout_1",
+            "hotel_rooms_1",
+            "hotel_guests_1",
+            "insurance_start",
+            "insurance_end",
+            "insurance_people",
+            "transfer_date",
+            "transfer_time",
+            "transfer_people",
+            "tour_date",
+            "tour_time",
+            "tour_people",
+            "car_pickup_date",
+            "car_pickup_time",
+            "car_return_date",
+            "car_return_time",
+        }
+
+        for saved_key, saved_value in draft["capture_state"].items():
+            has_dynamic_default = any(token in saved_key for token in explicit_default_tokens)
+            if (
+                saved_key not in st.session_state
+                and saved_key not in explicit_default_keys
+                and not has_dynamic_default
+            ):
+                st.session_state[saved_key] = saved_value
+
         st.markdown("### Captura")
         if "Vuelos" in draft["componentes"]:
             st.markdown("#### Vuelos")
@@ -330,12 +787,16 @@ def page_new_quote() -> None:
                 dep_date, dep_time = st.columns(2)
                 dep_date.date_input(
                     "Fecha de salida *",
-                    value=None,
+                    value=captured(
+                        f"{prefix}_departure_date_{segment_number}", None
+                    ),
                     key=f"{prefix}_departure_date_{segment_number}",
                 )
                 dep_time.time_input(
                     "Hora de salida *",
-                    value=time(8, 0),
+                    value=captured(
+                        f"{prefix}_departure_time_{segment_number}", time(8, 0)
+                    ),
                     key=f"{prefix}_departure_time_{segment_number}",
                 )
 
@@ -343,12 +804,16 @@ def page_new_quote() -> None:
                 arr_date, arr_time = st.columns(2)
                 arr_date.date_input(
                     "Fecha de llegada *",
-                    value=None,
+                    value=captured(
+                        f"{prefix}_arrival_date_{segment_number}", None
+                    ),
                     key=f"{prefix}_arrival_date_{segment_number}",
                 )
                 arr_time.time_input(
                     "Hora de llegada *",
-                    value=time(12, 0),
+                    value=captured(
+                        f"{prefix}_arrival_time_{segment_number}", time(12, 0)
+                    ),
                     key=f"{prefix}_arrival_time_{segment_number}",
                 )
 
@@ -494,12 +959,12 @@ def page_new_quote() -> None:
             checkin_col, checkout_col = st.columns(2)
             checkin = checkin_col.date_input(
                 "Entrada *",
-                value=None,
+                value=captured("hotel_checkin_1", None),
                 key="hotel_checkin_1",
             )
             checkout = checkout_col.date_input(
                 "Salida *",
-                value=None,
+                value=captured("hotel_checkout_1", None),
                 key="hotel_checkout_1",
             )
 
@@ -517,14 +982,14 @@ def page_new_quote() -> None:
             rooms = rooms_col.number_input(
                 "Habitaciones",
                 min_value=1,
-                value=1,
+                value=int(captured("hotel_rooms_1", 1)),
                 step=1,
                 key="hotel_rooms_1",
             )
             guests = guests_col.number_input(
                 "Huéspedes",
                 min_value=1,
-                value=1,
+                value=int(captured("hotel_guests_1", 1)),
                 step=1,
                 key="hotel_guests_1",
             )
@@ -581,20 +1046,37 @@ def page_new_quote() -> None:
             )
 
             if hotel_image is not None:
-                st.image(
-                    hotel_image,
-                    caption=hotel_name or "Vista previa del hotel",
-                    use_container_width=True,
-                )
-            elif hotel_image_url:
                 try:
-                    st.image(
-                        hotel_image_url,
-                        caption=hotel_name or "Vista previa del hotel",
-                        use_container_width=True,
-                    )
+                    draft["hotel_image_cache"] = {
+                        "name": getattr(hotel_image, "name", "hotel.jpg"),
+                        "type": getattr(hotel_image, "type", "image/jpeg"),
+                        "bytes": hotel_image.getvalue(),
+                    }
                 except Exception:
-                    st.warning("No pudimos mostrar la imagen desde ese enlace.")
+                    pass
+
+            preview_source = None
+            preview_caption = hotel_name or "Vista previa del hotel"
+
+            if hotel_image is not None:
+                preview_source = hotel_image
+            elif draft.get("hotel_image_cache"):
+                preview_source = draft["hotel_image_cache"]["bytes"]
+                st.caption("Imagen adjunta conservada. Puedes cargar otra para reemplazarla.")
+            elif hotel_image_url:
+                preview_source = hotel_image_url
+
+            if preview_source is not None:
+                try:
+                    preview_col, _ = st.columns([1, 2.2])
+                    with preview_col:
+                        st.image(
+                            preview_source,
+                            caption=preview_caption,
+                            width=230,
+                        )
+                except Exception:
+                    st.warning("No pudimos mostrar la vista previa de esa imagen.")
 
             links_col1, links_col2 = st.columns(2)
             hotel_url = links_col1.text_input(
@@ -648,12 +1130,12 @@ def page_new_quote() -> None:
                         date_col1, date_col2 = st.columns(2)
                         insurance_start = date_col1.date_input(
                             "Inicio de cobertura",
-                            value=None,
+                            value=captured("insurance_start", None),
                             key="insurance_start",
                         )
                         insurance_end = date_col2.date_input(
                             "Fin de cobertura",
-                            value=None,
+                            value=captured("insurance_end", None),
                             key="insurance_end",
                         )
 
@@ -678,7 +1160,7 @@ def page_new_quote() -> None:
                         people_col.number_input(
                             "Viajeros cubiertos",
                             min_value=1,
-                            value=1,
+                            value=int(captured("insurance_people", 1)),
                             step=1,
                             key="insurance_people",
                         )
@@ -731,12 +1213,12 @@ def page_new_quote() -> None:
                         date_col, time_col = st.columns(2)
                         date_col.date_input(
                             "Fecha",
-                            value=None,
+                            value=captured("transfer_date", None),
                             key="transfer_date",
                         )
                         time_col.time_input(
                             "Hora",
-                            value=time(12, 0),
+                            value=captured("transfer_time", time(12, 0)),
                             key="transfer_time",
                         )
 
@@ -749,7 +1231,7 @@ def page_new_quote() -> None:
                         people_col.number_input(
                             "Pasajeros",
                             min_value=1,
-                            value=1,
+                            value=int(captured("transfer_people", 1)),
                             step=1,
                             key="transfer_people",
                         )
@@ -796,12 +1278,12 @@ def page_new_quote() -> None:
                         date_col, time_col = st.columns(2)
                         date_col.date_input(
                             "Fecha",
-                            value=None,
+                            value=captured("tour_date", None),
                             key="tour_date",
                         )
                         time_col.time_input(
                             "Hora",
-                            value=time(9, 0),
+                            value=captured("tour_time", time(9, 0)),
                             key="tour_time",
                         )
 
@@ -814,7 +1296,7 @@ def page_new_quote() -> None:
                         people_col.number_input(
                             "Participantes",
                             min_value=1,
-                            value=1,
+                            value=int(captured("tour_people", 1)),
                             step=1,
                             key="tour_people",
                         )
@@ -873,24 +1355,24 @@ def page_new_quote() -> None:
                         pickup_date_col, pickup_time_col = st.columns(2)
                         pickup_date = pickup_date_col.date_input(
                             "Fecha de entrega",
-                            value=None,
+                            value=captured("car_pickup_date", None),
                             key="car_pickup_date",
                         )
                         pickup_time_col.time_input(
                             "Hora de entrega",
-                            value=time(12, 0),
+                            value=captured("car_pickup_time", time(12, 0)),
                             key="car_pickup_time",
                         )
 
                         return_date_col, return_time_col = st.columns(2)
                         return_date = return_date_col.date_input(
                             "Fecha de devolución",
-                            value=None,
+                            value=captured("car_return_date", None),
                             key="car_return_date",
                         )
                         return_time_col.time_input(
                             "Hora de devolución",
-                            value=time(12, 0),
+                            value=captured("car_return_time", time(12, 0)),
                             key="car_return_time",
                         )
 
@@ -964,9 +1446,11 @@ def page_new_quote() -> None:
 
         b1, b2 = st.columns(2)
         if b1.button("Regresar", use_container_width=True):
+            persist_capture_state()
             st.session_state.quote_step = 2
             st.rerun()
         if b2.button("Revisar cotización", type="primary", use_container_width=True):
+            persist_capture_state()
             st.session_state.quote_step = 4
             st.rerun()
 
@@ -990,6 +1474,15 @@ def page_new_quote() -> None:
             nombre_completo or "Viajero sin nombre",
             "Verifica que el nombre esté escrito exactamente como aparece en su documento.",
         )
+
+        traveler_count = st.number_input(
+            "Viajeros incluidos en esta cotización",
+            min_value=1,
+            value=max(int(draft.get("num_viajeros", 1) or 1), 1),
+            step=1,
+            key="review_traveler_count",
+        )
+        draft["num_viajeros"] = int(traveler_count)
 
         st.markdown("#### Resumen de la cotización")
         st.caption(
@@ -1016,8 +1509,10 @@ def page_new_quote() -> None:
             mode_key = f"review_charge_mode_{service_key}"
             amount_key = f"review_charge_amount_{service_key}"
             text_key = f"review_charge_text_{service_key}"
+            apply_key = f"review_charge_apply_{service_key}"
+            total_key = f"review_charge_total_{service_key}"
 
-            current = st.session_state.get(mode_key, default_mode)
+            current = captured(mode_key, default_mode)
             mode = st.radio(
                 "Cargo por servicio EVA",
                 ["Estándar $250 MXN", "Personalizado", "Sin cargo"],
@@ -1026,42 +1521,68 @@ def page_new_quote() -> None:
                 key=mode_key,
             )
 
-            if mode == "Estándar $250 MXN":
-                st.session_state[text_key] = "Cargo por servicio"
-                st.session_state[amount_key] = 250.0
-                st.caption("Se agregarán $250 MXN a esta sección.")
-                return "Cargo por servicio", 250.0
+            if mode == "Sin cargo":
+                st.session_state[text_key] = ""
+                st.session_state[amount_key] = 0.0
+                st.session_state[apply_key] = "Por cotización"
+                st.session_state[total_key] = 0.0
+                return "", 0.0
 
-            if mode == "Personalizado":
+            if mode == "Estándar $250 MXN":
+                concept = "Cargo por servicio"
+                unit_amount = 250.0
+                st.session_state[text_key] = concept
+                st.session_state[amount_key] = unit_amount
+            else:
                 c1, c2 = st.columns([1.4, 1])
                 concept = c1.text_input(
                     "Concepto",
-                    value=st.session_state.get(text_key, "Cargo por servicio"),
+                    value=captured(text_key, "Cargo por servicio"),
                     key=text_key,
                 )
-                amount = c2.number_input(
-                    "Importe MXN",
+                unit_amount = c2.number_input(
+                    "Importe base MXN",
                     min_value=0.0,
-                    value=float(st.session_state.get(amount_key, 250.0)),
+                    value=float(captured(amount_key, 250.0)),
                     step=50.0,
                     key=amount_key,
                 )
-                return concept, float(amount)
 
-            st.session_state[text_key] = ""
-            st.session_state[amount_key] = 0.0
-            return "", 0.0
+            apply_default = "Por pasajero" if default_enabled else "Por cotización"
+            apply_current = captured(apply_key, apply_default)
+            apply_mode = st.radio(
+                "Aplicar",
+                ["Por pasajero", "Por cotización"],
+                index=["Por pasajero", "Por cotización"].index(apply_current),
+                horizontal=True,
+                key=apply_key,
+            )
+
+            if apply_mode == "Por pasajero":
+                total_amount = float(unit_amount) * int(draft.get("num_viajeros", 1) or 1)
+                st.caption(
+                    f"${unit_amount:,.2f} × {int(draft.get('num_viajeros', 1) or 1)} "
+                    f"viajero{'s' if int(draft.get('num_viajeros', 1) or 1) != 1 else ''} "
+                    f"= ${total_amount:,.2f} MXN"
+                )
+            else:
+                total_amount = float(unit_amount)
+                st.caption(f"Cargo total de esta sección: ${total_amount:,.2f} MXN")
+
+            st.session_state[total_key] = total_amount
+            return concept, total_amount
+
 
         # VUELOS
         if "Vuelos" in draft["componentes"]:
             with st.container(border=True):
                 st.markdown("##### ✈️ Vuelos")
 
-                trip_type = st.session_state.get("flight_trip_type", "Viaje sencillo")
+                trip_type = captured("flight_trip_type", "Viaje sencillo")
                 st.write(f"**Tipo de viaje:** {trip_type}")
 
-                flight_price = float(st.session_state.get("flight_total_price", 0.0) or 0.0)
-                flight_currency = st.session_state.get("flight_total_currency", "MXN")
+                flight_price = float(captured("flight_total_price", 0.0) or 0.0)
+                flight_currency = captured("flight_total_currency", "MXN")
                 st.write(f"**Precio:** {amount_text(flight_price, flight_currency)}")
 
                 # Mostrar ruta principal si existe
@@ -1070,8 +1591,8 @@ def page_new_quote() -> None:
                     ("multicity_origin_1", "multicity_destination_1"),
                 ]
                 for origin_key, destination_key in route_candidates:
-                    origin = st.session_state.get(origin_key, "")
-                    destination = st.session_state.get(destination_key, "")
+                    origin = captured(origin_key, "")
+                    destination = captured(destination_key, "")
                     if origin or destination:
                         st.write(f"**Ruta:** {origin or '—'} → {destination or '—'}")
                         break
@@ -1087,12 +1608,12 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🏨 Hospedaje")
 
-                hotel_name = st.session_state.get("hotel_name_1", "")
-                hotel_city = st.session_state.get("hotel_city_1", "")
-                checkin = st.session_state.get("hotel_checkin_1")
-                checkout = st.session_state.get("hotel_checkout_1")
-                hotel_price = float(st.session_state.get("hotel_price_1", 0.0) or 0.0)
-                hotel_currency = st.session_state.get("hotel_currency_1", "MXN")
+                hotel_name = captured("hotel_name_1", "")
+                hotel_city = captured("hotel_city_1", "")
+                checkin = captured("hotel_checkin_1")
+                checkout = captured("hotel_checkout_1")
+                hotel_price = float(captured("hotel_price_1", 0.0) or 0.0)
+                hotel_currency = captured("hotel_currency_1", "MXN")
 
                 if hotel_name:
                     st.write(f"**Hotel:** {hotel_name}")
@@ -1115,10 +1636,10 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🛡️ Seguro de viaje")
 
-                provider = st.session_state.get("insurance_provider", "")
-                plan = st.session_state.get("insurance_plan", "")
-                price = float(st.session_state.get("insurance_price", 0.0) or 0.0)
-                currency = st.session_state.get("insurance_currency", "MXN")
+                provider = captured("insurance_provider", "")
+                plan = captured("insurance_plan", "")
+                price = float(captured("insurance_price", 0.0) or 0.0)
+                currency = captured("insurance_currency", "MXN")
 
                 if provider:
                     st.write(f"**Proveedor:** {provider}")
@@ -1137,11 +1658,11 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🚐 Traslado")
 
-                transfer_type = st.session_state.get("transfer_type", "")
-                origin = st.session_state.get("transfer_origin", "")
-                destination = st.session_state.get("transfer_destination", "")
-                price = float(st.session_state.get("transfer_price", 0.0) or 0.0)
-                currency = st.session_state.get("transfer_currency", "MXN")
+                transfer_type = captured("transfer_type", "")
+                origin = captured("transfer_origin", "")
+                destination = captured("transfer_destination", "")
+                price = float(captured("transfer_price", 0.0) or 0.0)
+                currency = captured("transfer_currency", "MXN")
 
                 if transfer_type:
                     st.write(f"**Tipo:** {transfer_type}")
@@ -1160,10 +1681,10 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🚗 Renta de auto")
 
-                company = st.session_state.get("car_company", "")
-                category = st.session_state.get("car_category", "")
-                price = float(st.session_state.get("car_price", 0.0) or 0.0)
-                currency = st.session_state.get("car_currency", "MXN")
+                company = captured("car_company", "")
+                category = captured("car_category", "")
+                price = float(captured("car_price", 0.0) or 0.0)
+                currency = captured("car_currency", "MXN")
 
                 if company:
                     st.write(f"**Arrendadora:** {company}")
@@ -1182,10 +1703,10 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🎟️ Tour o actividad")
 
-                tour_name = st.session_state.get("tour_name", "")
-                city = st.session_state.get("tour_city", "")
-                price = float(st.session_state.get("tour_price", 0.0) or 0.0)
-                currency = st.session_state.get("tour_currency", "MXN")
+                tour_name = captured("tour_name", "")
+                city = captured("tour_city", "")
+                price = float(captured("tour_price", 0.0) or 0.0)
+                currency = captured("tour_currency", "MXN")
 
                 if tour_name:
                     st.write(f"**Actividad:** {tour_name}")
@@ -1204,9 +1725,9 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### ➕ Otro servicio")
 
-                service_name = st.session_state.get("other_service_name", "")
-                price = float(st.session_state.get("other_service_price", 0.0) or 0.0)
-                currency = st.session_state.get("other_service_currency", "MXN")
+                service_name = captured("other_service_name", "")
+                price = float(captured("other_service_price", 0.0) or 0.0)
+                currency = captured("other_service_currency", "MXN")
 
                 if service_name:
                     st.write(f"**Servicio:** {service_name}")
@@ -1236,15 +1757,18 @@ def page_new_quote() -> None:
         for label, key in service_charge_keys:
             if label not in draft["componentes"]:
                 continue
-            amount = float(st.session_state.get(f"review_charge_amount_{key}", 0.0) or 0.0)
-            concept = st.session_state.get(f"review_charge_text_{key}", "")
+            amount = float(captured(f"review_charge_total_{key}", 0.0) or 0.0)
+            concept = captured(f"review_charge_text_{key}", "")
+            apply_mode = captured(f"review_charge_apply_{key}", "Por cotización")
             if amount > 0:
-                charge_rows.append((label, concept or "Cargo por servicio", amount))
+                charge_rows.append((label, concept or "Cargo por servicio", amount, apply_mode))
                 total_charge_mxn += amount
 
         if charge_rows:
-            for label, concept, amount in charge_rows:
-                st.write(f"**{label}:** {concept} · ${amount:,.2f} MXN")
+            for label, concept, amount, apply_mode in charge_rows:
+                st.write(
+                    f"**{label}:** {concept} · ${amount:,.2f} MXN · {apply_mode.lower()}"
+                )
             st.success(f"Total cargos EVA: ${total_charge_mxn:,.2f} MXN")
         else:
             st.caption("Esta cotización no tiene cargos por servicio.")
@@ -1271,12 +1795,56 @@ def page_new_quote() -> None:
     else:
         st.markdown("### Documento y guardado")
         st.success("El borrador está listo para generar documento o guardar.")
-        c1, c2 = st.columns(2)
-        c1.button("Generar PDF", use_container_width=True, type="primary")
-        c2.button("Guardar cotización", use_container_width=True)
+
+        st.markdown("#### Vista previa del documento")
+        if draft["modo_viajero"] == "Buscar viajero existente":
+            traveler_name = draft["viajero_existente"] or "Viajero"
+        else:
+            traveler_name = " ".join(
+                parte
+                for parte in [
+                    draft["nombres"],
+                    draft["apellido_paterno"],
+                    draft["apellido_materno"],
+                ]
+                if parte
+            ) or "Viajero"
+
+        st.write(f"**Viajero principal:** {traveler_name}")
+        st.write(f"**Viajeros:** {max(int(draft.get('num_viajeros', 1) or 1), 1)}")
+        st.write(
+            "**Incluye:** "
+            + ", ".join(draft.get("componentes", []))
+        )
+
+        try:
+            pdf_bytes = build_quote_pdf(draft, captured)
+            st.download_button(
+                "Generar / descargar PDF",
+                data=pdf_bytes,
+                file_name="Cotizacion_Proyecto_EVA.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary",
+            )
+        except Exception as exc:
+            st.error(f"No pudimos generar el PDF: {exc}")
+
+        st.button(
+            "Guardar cotización",
+            use_container_width=True,
+            disabled=True,
+            help="La sincronización con Google Sheets se conectará en la siguiente fase.",
+        )
+
+        st.caption(
+            "El PDF se genera directamente con el borrador local; no consulta Google Sheets."
+        )
+
         if st.button("Regresar a revisión", use_container_width=True):
             st.session_state.quote_step = 4
             st.rerun()
+
 
 
 def page_open_quote() -> None:
