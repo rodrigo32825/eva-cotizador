@@ -291,108 +291,179 @@ def page_new_quote() -> None:
                 "Tipo de viaje",
                 ["Viaje sencillo", "Viaje redondo", "Multidestino"],
                 horizontal=True,
+                key="flight_trip_type",
             )
 
-            st.markdown("##### Tramo 1")
+            def render_segment(prefix: str, segment_number: int, title: str) -> None:
+                st.markdown(f"##### {title}")
 
-            st.caption("Vuelo")
-            airline_col, flight_col = st.columns([1.4, 1])
-            airline_col.text_input(
-                "Aerolínea *",
-                placeholder="Ej. Volaris, Aeroméxico, LATAM",
-                key="flight_airline_1",
-            )
-            flight_col.text_input(
-                "Número de vuelo",
-                placeholder="Ej. Y4 245",
-                key="flight_number_1",
-            )
+                airline_col, flight_col = st.columns([1.4, 1])
+                airline_col.text_input(
+                    "Aerolínea *",
+                    placeholder="Ej. Volaris, Aeroméxico, LATAM",
+                    key=f"{prefix}_airline_{segment_number}",
+                )
+                flight_col.text_input(
+                    "Número de vuelo",
+                    placeholder="Ej. Y4 245",
+                    key=f"{prefix}_number_{segment_number}",
+                )
 
-            st.caption("Ruta")
-            origin, destination = st.columns(2)
-            origin.text_input(
-                "Origen *",
-                placeholder="Ciudad o aeropuerto",
-                key="flight_origin_1",
-            )
-            destination.text_input(
-                "Destino *",
-                placeholder="Ciudad o aeropuerto",
-                key="flight_destination_1",
-            )
+                st.caption("Ruta")
+                origin, destination = st.columns(2)
+                origin.text_input(
+                    "Origen *",
+                    placeholder="Ciudad o aeropuerto",
+                    key=f"{prefix}_origin_{segment_number}",
+                )
+                destination.text_input(
+                    "Destino *",
+                    placeholder="Ciudad o aeropuerto",
+                    key=f"{prefix}_destination_{segment_number}",
+                )
 
-            st.caption("Salida")
-            dep_date, dep_time = st.columns(2)
-            dep_date.date_input(
-                "Fecha de salida *",
-                value=None,
-                key="flight_departure_date_1",
-            )
-            dep_time.time_input(
-                "Hora de salida *",
-                value=time(8, 0),
-                key="flight_departure_time_1",
-            )
+                st.caption("Salida")
+                dep_date, dep_time = st.columns(2)
+                dep_date.date_input(
+                    "Fecha de salida *",
+                    value=None,
+                    key=f"{prefix}_departure_date_{segment_number}",
+                )
+                dep_time.time_input(
+                    "Hora de salida *",
+                    value=time(8, 0),
+                    key=f"{prefix}_departure_time_{segment_number}",
+                )
 
-            st.caption("Llegada")
-            arr_date, arr_time = st.columns(2)
-            arr_date.date_input(
-                "Fecha de llegada *",
-                value=None,
-                key="flight_arrival_date_1",
-            )
-            arr_time.time_input(
-                "Hora de llegada *",
-                value=time(12, 0),
-                key="flight_arrival_time_1",
-            )
+                st.caption("Llegada")
+                arr_date, arr_time = st.columns(2)
+                arr_date.date_input(
+                    "Fecha de llegada *",
+                    value=None,
+                    key=f"{prefix}_arrival_date_{segment_number}",
+                )
+                arr_time.time_input(
+                    "Hora de llegada *",
+                    value=time(12, 0),
+                    key=f"{prefix}_arrival_time_{segment_number}",
+                )
 
-            st.caption("Tarifa")
-            fare_col, cabin_col = st.columns(2)
-            fare_col.text_input(
-                "Tarifa o familia",
-                placeholder="Ej. Básica, Classic, Plus",
-                key="flight_fare_1",
-            )
-            cabin_col.selectbox(
-                "Cabina",
-                ["Económica", "Premium Economy", "Ejecutiva", "Primera"],
-                key="flight_cabin_1",
-            )
+                fare_col, cabin_col = st.columns(2)
+                fare_col.text_input(
+                    "Tarifa o familia",
+                    placeholder="Ej. Básica, Classic, Plus",
+                    key=f"{prefix}_fare_{segment_number}",
+                )
+                cabin_col.selectbox(
+                    "Cabina",
+                    ["Económica", "Premium Economy", "Ejecutiva", "Primera"],
+                    key=f"{prefix}_cabin_{segment_number}",
+                )
 
-            baggage_col, notes_col = st.columns(2)
-            baggage_col.text_input(
-                "Equipaje incluido",
-                placeholder="Ej. Artículo personal + 15 kg",
-                key="flight_baggage_1",
-            )
-            notes_col.text_input(
-                "Observaciones",
-                placeholder="Ej. Operado por otra aerolínea",
-                key="flight_notes_1",
-            )
+                baggage_col, notes_col = st.columns(2)
+                baggage_col.text_input(
+                    "Equipaje incluido",
+                    placeholder="Ej. Artículo personal + 15 kg",
+                    key=f"{prefix}_baggage_{segment_number}",
+                )
+                notes_col.text_input(
+                    "Observaciones",
+                    placeholder="Ej. Operado por otra aerolínea",
+                    key=f"{prefix}_notes_{segment_number}",
+                )
 
-            st.caption("Precio mostrado")
+            def render_direction(label: str, prefix: str) -> None:
+                st.markdown(f"### {label}")
+
+                connection_type = st.radio(
+                    "Tipo de recorrido",
+                    ["Vuelo directo", "Con escalas"],
+                    horizontal=True,
+                    key=f"{prefix}_connection_type",
+                )
+
+                if connection_type == "Con escalas":
+                    stops = st.selectbox(
+                        "Número de escalas",
+                        [1, 2, 3],
+                        key=f"{prefix}_stops",
+                    )
+                else:
+                    stops = 0
+
+                total_segments = stops + 1
+
+                for idx in range(total_segments):
+                    render_segment(
+                        prefix,
+                        idx + 1,
+                        f"Tramo {idx + 1} de {total_segments}",
+                    )
+
+                    if idx < total_segments - 1:
+                        st.info(
+                            "La llegada de este tramo será el aeropuerto de conexión "
+                            "del siguiente."
+                        )
+                        st.divider()
+
+            if trip_type == "Viaje sencillo":
+                render_direction("Trayecto", "outbound")
+
+            elif trip_type == "Viaje redondo":
+                render_direction("Ida", "outbound")
+                st.divider()
+                render_direction("Regreso", "return")
+
+            else:
+                st.info(
+                    "En multidestino, cada tramo representa una ruta distinta. "
+                    "Podrás agregar tantos como necesites."
+                )
+
+                if "multicity_segments" not in st.session_state:
+                    st.session_state.multicity_segments = 2
+
+                for idx in range(st.session_state.multicity_segments):
+                    render_segment(
+                        "multicity",
+                        idx + 1,
+                        f"Tramo {idx + 1}",
+                    )
+                    if idx < st.session_state.multicity_segments - 1:
+                        st.divider()
+
+                add_col, remove_col = st.columns(2)
+                if add_col.button(
+                    "+ Agregar tramo",
+                    use_container_width=True,
+                    key="add_multicity_segment",
+                ):
+                    st.session_state.multicity_segments += 1
+                    st.rerun()
+
+                if remove_col.button(
+                    "Quitar último tramo",
+                    use_container_width=True,
+                    disabled=st.session_state.multicity_segments <= 2,
+                    key="remove_multicity_segment",
+                ):
+                    st.session_state.multicity_segments -= 1
+                    st.rerun()
+
+            st.markdown("### Precio de la opción")
             price_col, currency_col = st.columns([1.4, 1])
             price_col.number_input(
-                "Importe",
+                "Precio total mostrado por la aerolínea",
                 min_value=0.0,
                 step=100.0,
-                key="flight_price_1",
+                key="flight_total_price",
             )
             currency_col.selectbox(
                 "Moneda",
                 ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
-                key="flight_currency_1",
+                key="flight_total_currency",
             )
-
-            st.button(
-                "+ Agregar otro tramo",
-                use_container_width=True,
-                key="add_flight_segment",
-            )
-
-            st.caption(f"Seleccionado: {trip_type}")
 
         if "Hospedaje" in draft["componentes"]:
             st.markdown("#### Hospedaje")
