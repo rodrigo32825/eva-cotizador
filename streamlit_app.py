@@ -58,6 +58,8 @@ def init_state() -> None:
         "page": "Inicio",
         "quote_step": 1,
         "draft": {
+            "modo_viajero": "Buscar viajero existente",
+            "viajero_existente": "",
             "nombres": "",
             "apellido_paterno": "",
             "apellido_materno": "",
@@ -167,36 +169,57 @@ def page_new_quote() -> None:
     if step == 1:
         st.markdown("### Viajero y contacto")
 
-        nombres = st.text_input(
-            "Nombre(s) *",
-            value=draft["nombres"],
-            placeholder="Ej. Evelyne",
+        modo_viajero = st.radio(
+            "¿Cómo deseas agregar al viajero?",
+            ["Buscar viajero existente", "Registrar nuevo viajero"],
+            index=0 if draft["modo_viajero"] == "Buscar viajero existente" else 1,
+            horizontal=True,
         )
 
-        c1, c2 = st.columns(2)
-        apellido_paterno = c1.text_input(
-            "Apellido paterno *",
-            value=draft["apellido_paterno"],
-            placeholder="Ej. Charland",
-        )
-        apellido_materno = c2.text_input(
-            "Apellido materno",
-            value=draft["apellido_materno"],
-            placeholder="Déjalo vacío si no aplica",
-        )
+        if modo_viajero == "Buscar viajero existente":
+            viajero_existente = st.text_input(
+                "Buscar viajero",
+                value=draft["viajero_existente"],
+                placeholder="Escribe nombre, apellido, correo o teléfono",
+            )
+            st.caption(
+                "Cuando conectemos esta pantalla, aquí aparecerán coincidencias "
+                "de los viajeros ya registrados."
+            )
+            nombres = draft["nombres"]
+            apellido_paterno = draft["apellido_paterno"]
+            apellido_materno = draft["apellido_materno"]
+        else:
+            c1, c2, c3 = st.columns([1.2, 1, 1])
+            nombres = c1.text_input(
+                "Nombre(s) *",
+                value=draft["nombres"],
+                placeholder="Ej. Evelyne",
+            )
+            apellido_paterno = c2.text_input(
+                "Apellido paterno *",
+                value=draft["apellido_paterno"],
+                placeholder="Ej. Charland",
+            )
+            apellido_materno = c3.text_input(
+                "Apellido materno",
+                value=draft["apellido_materno"],
+                placeholder="Opcional",
+            )
+            viajero_existente = ""
 
-        st.caption(
-            "Captura el nombre exactamente como aparece en el pasaporte "
-            "o identificación del viajero."
-        )
+            st.caption(
+                "Captura el nombre exactamente como aparece en el pasaporte "
+                "o identificación del viajero."
+            )
 
-        c3, c4 = st.columns(2)
-        contact = c3.text_input(
+        c4, c5 = st.columns(2)
+        contact = c4.text_input(
             "Cliente o contacto",
             value=draft["cliente_contacto"],
             placeholder="Puede ser distinto al viajero",
         )
-        phone = c4.text_input(
+        phone = c5.text_input(
             "Teléfono",
             value=draft["telefono"],
         )
@@ -206,13 +229,20 @@ def page_new_quote() -> None:
         )
 
         if st.button("Continuar", type="primary", use_container_width=True):
-            if not nombres.strip():
-                st.warning("Escribe el nombre o nombres del viajero.")
-                return
-            if not apellido_paterno.strip():
-                st.warning("Escribe el apellido paterno del viajero.")
-                return
+            if modo_viajero == "Buscar viajero existente":
+                if not viajero_existente.strip():
+                    st.warning("Busca y selecciona un viajero.")
+                    return
+            else:
+                if not nombres.strip():
+                    st.warning("Escribe el nombre o nombres del viajero.")
+                    return
+                if not apellido_paterno.strip():
+                    st.warning("Escribe el apellido paterno del viajero.")
+                    return
 
+            draft["modo_viajero"] = modo_viajero
+            draft["viajero_existente"] = viajero_existente.strip()
             draft["nombres"] = nombres.strip()
             draft["apellido_paterno"] = apellido_paterno.strip()
             draft["apellido_materno"] = apellido_materno.strip()
@@ -295,15 +325,19 @@ def page_new_quote() -> None:
 
     elif step == 4:
         st.markdown("### Revisión")
-        nombre_completo = " ".join(
-            parte
-            for parte in [
-                draft["nombres"],
-                draft["apellido_paterno"],
-                draft["apellido_materno"],
-            ]
-            if parte
-        )
+        if draft["modo_viajero"] == "Buscar viajero existente":
+            nombre_completo = draft["viajero_existente"]
+        else:
+            nombre_completo = " ".join(
+                parte
+                for parte in [
+                    draft["nombres"],
+                    draft["apellido_paterno"],
+                    draft["apellido_materno"],
+                ]
+                if parte
+            )
+
         section_card(
             nombre_completo or "Viajero sin nombre",
             "Verifica que el nombre esté escrito exactamente como aparece en su documento.",
