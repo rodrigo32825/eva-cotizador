@@ -254,32 +254,36 @@ def page_new_quote() -> None:
 
     elif step == 2:
         st.markdown("### ¿Qué incluirá esta cotización?")
-        components = st.multiselect("Selecciona uno o varios componentes", ["Vuelos", "Hospedaje", "Seguro de viaje", "Traslados", "Tours o actividades", "Otro servicio"], default=draft["componentes"])
-        st.markdown("### Cargo por servicio")
-        c1, c2 = st.columns(2)
-        charge_type = c1.radio("Modalidad", ["Estándar", "Personalizado", "Sin cargo"], index=["Estándar", "Personalizado", "Sin cargo"].index(draft["cargo_tipo"]))
-        charge_apply = c2.radio("Aplicar", ["Por cotización", "Por pasajero"], index=["Por cotización", "Por pasajero"].index(draft["cargo_aplicacion"]))
-        if charge_type == "Estándar":
-            charge_text, charge_amount = "Cargo por servicio", 250.0
-            st.info("Se aplicará un cargo estándar de $250 MXN.")
-        elif charge_type == "Personalizado":
-            charge_text = st.text_input("Texto del cargo", value=draft["cargo_texto"], placeholder="Ej. Servicio de asesoría y emisión")
-            charge_amount = st.number_input("Importe del cargo (MXN)", min_value=0.0, value=float(draft["cargo_importe"]), step=50.0)
-        else:
-            charge_text, charge_amount = "", 0.0
+
+        components = st.multiselect(
+            "Selecciona uno o varios componentes",
+            [
+                "Vuelos",
+                "Hospedaje",
+                "Seguro de viaje",
+                "Traslados",
+                "Renta de auto",
+                "Tours o actividades",
+                "Otro servicio",
+            ],
+            default=draft["componentes"],
+        )
+
+        st.caption(
+            "Puedes comenzar solo con vuelos y agregar hospedaje o servicios después."
+        )
+
         b1, b2 = st.columns(2)
         if b1.button("Regresar", use_container_width=True):
             st.session_state.quote_step = 1
             st.rerun()
+
         if b2.button("Continuar", type="primary", use_container_width=True):
             if not components:
                 st.warning("Selecciona al menos un componente.")
                 return
+
             draft["componentes"] = components
-            draft["cargo_tipo"] = charge_type
-            draft["cargo_texto"] = charge_text
-            draft["cargo_importe"] = float(charge_amount)
-            draft["cargo_aplicacion"] = charge_apply
             st.session_state.quote_step = 3
             st.rerun()
 
@@ -968,6 +972,7 @@ def page_new_quote() -> None:
 
     elif step == 4:
         st.markdown("### Revisión")
+
         if draft["modo_viajero"] == "Buscar viajero existente":
             nombre_completo = draft["viajero_existente"]
         else:
@@ -985,17 +990,281 @@ def page_new_quote() -> None:
             nombre_completo or "Viajero sin nombre",
             "Verifica que el nombre esté escrito exactamente como aparece en su documento.",
         )
-        st.write("**Componentes incluidos:**")
-        for item in draft["componentes"]:
-            st.write(f"• {item}")
-        if draft["cargo_tipo"] != "Sin cargo":
-            st.write(f"**{draft['cargo_texto']}:** ${draft['cargo_importe']:,.2f} MXN · {draft['cargo_aplicacion']}")
-        st.info("Esta primera versión valida el flujo y la experiencia. Todavía no envía información a Google Sheets.")
+
+        st.markdown("#### Resumen de la cotización")
+        st.caption(
+            "Revisa cada sección. El cargo por servicio se define aquí, al final."
+        )
+
+        chargeable_services = {
+            "Vuelos": True,
+            "Hospedaje": False,
+            "Seguro de viaje": False,
+            "Traslados": False,
+            "Renta de auto": True,
+            "Tours o actividades": True,
+            "Otro servicio": False,
+        }
+
+        def amount_text(amount: float, currency: str) -> str:
+            if not amount:
+                return "Sin precio capturado"
+            return f"{currency} {amount:,.2f}"
+
+        def render_charge(service_key: str, default_enabled: bool) -> tuple[str, float]:
+            default_mode = "Estándar $250 MXN" if default_enabled else "Sin cargo"
+            mode_key = f"review_charge_mode_{service_key}"
+            amount_key = f"review_charge_amount_{service_key}"
+            text_key = f"review_charge_text_{service_key}"
+
+            current = st.session_state.get(mode_key, default_mode)
+            mode = st.radio(
+                "Cargo por servicio EVA",
+                ["Estándar $250 MXN", "Personalizado", "Sin cargo"],
+                index=["Estándar $250 MXN", "Personalizado", "Sin cargo"].index(current),
+                horizontal=True,
+                key=mode_key,
+            )
+
+            if mode == "Estándar $250 MXN":
+                st.session_state[text_key] = "Cargo por servicio"
+                st.session_state[amount_key] = 250.0
+                st.caption("Se agregarán $250 MXN a esta sección.")
+                return "Cargo por servicio", 250.0
+
+            if mode == "Personalizado":
+                c1, c2 = st.columns([1.4, 1])
+                concept = c1.text_input(
+                    "Concepto",
+                    value=st.session_state.get(text_key, "Cargo por servicio"),
+                    key=text_key,
+                )
+                amount = c2.number_input(
+                    "Importe MXN",
+                    min_value=0.0,
+                    value=float(st.session_state.get(amount_key, 250.0)),
+                    step=50.0,
+                    key=amount_key,
+                )
+                return concept, float(amount)
+
+            st.session_state[text_key] = ""
+            st.session_state[amount_key] = 0.0
+            return "", 0.0
+
+        # VUELOS
+        if "Vuelos" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### ✈️ Vuelos")
+
+                trip_type = st.session_state.get("flight_trip_type", "Viaje sencillo")
+                st.write(f"**Tipo de viaje:** {trip_type}")
+
+                flight_price = float(st.session_state.get("flight_total_price", 0.0) or 0.0)
+                flight_currency = st.session_state.get("flight_total_currency", "MXN")
+                st.write(f"**Precio:** {amount_text(flight_price, flight_currency)}")
+
+                # Mostrar ruta principal si existe
+                route_candidates = [
+                    ("outbound_origin_1", "outbound_destination_1"),
+                    ("multicity_origin_1", "multicity_destination_1"),
+                ]
+                for origin_key, destination_key in route_candidates:
+                    origin = st.session_state.get(origin_key, "")
+                    destination = st.session_state.get(destination_key, "")
+                    if origin or destination:
+                        st.write(f"**Ruta:** {origin or '—'} → {destination or '—'}")
+                        break
+
+                render_charge("flights", chargeable_services["Vuelos"])
+
+                if st.button("Editar vuelos", key="review_edit_flights"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # HOSPEDAJE
+        if "Hospedaje" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### 🏨 Hospedaje")
+
+                hotel_name = st.session_state.get("hotel_name_1", "")
+                hotel_city = st.session_state.get("hotel_city_1", "")
+                checkin = st.session_state.get("hotel_checkin_1")
+                checkout = st.session_state.get("hotel_checkout_1")
+                hotel_price = float(st.session_state.get("hotel_price_1", 0.0) or 0.0)
+                hotel_currency = st.session_state.get("hotel_currency_1", "MXN")
+
+                if hotel_name:
+                    st.write(f"**Hotel:** {hotel_name}")
+                if hotel_city:
+                    st.write(f"**Destino:** {hotel_city}")
+                if checkin and checkout:
+                    nights = (checkout - checkin).days
+                    if nights > 0:
+                        st.write(f"**Estancia:** {nights} noche{'s' if nights != 1 else ''}")
+                st.write(f"**Precio:** {amount_text(hotel_price, hotel_currency)}")
+
+                render_charge("hotel", chargeable_services["Hospedaje"])
+
+                if st.button("Editar hospedaje", key="review_edit_hotel"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # SEGURO
+        if "Seguro de viaje" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### 🛡️ Seguro de viaje")
+
+                provider = st.session_state.get("insurance_provider", "")
+                plan = st.session_state.get("insurance_plan", "")
+                price = float(st.session_state.get("insurance_price", 0.0) or 0.0)
+                currency = st.session_state.get("insurance_currency", "MXN")
+
+                if provider:
+                    st.write(f"**Proveedor:** {provider}")
+                if plan:
+                    st.write(f"**Plan:** {plan}")
+                st.write(f"**Precio:** {amount_text(price, currency)}")
+
+                render_charge("insurance", chargeable_services["Seguro de viaje"])
+
+                if st.button("Editar seguro", key="review_edit_insurance"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # TRASLADOS
+        if "Traslados" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### 🚐 Traslado")
+
+                transfer_type = st.session_state.get("transfer_type", "")
+                origin = st.session_state.get("transfer_origin", "")
+                destination = st.session_state.get("transfer_destination", "")
+                price = float(st.session_state.get("transfer_price", 0.0) or 0.0)
+                currency = st.session_state.get("transfer_currency", "MXN")
+
+                if transfer_type:
+                    st.write(f"**Tipo:** {transfer_type}")
+                if origin or destination:
+                    st.write(f"**Ruta:** {origin or '—'} → {destination or '—'}")
+                st.write(f"**Precio:** {amount_text(price, currency)}")
+
+                render_charge("transfer", chargeable_services["Traslados"])
+
+                if st.button("Editar traslado", key="review_edit_transfer"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # RENTA DE AUTO
+        if "Renta de auto" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### 🚗 Renta de auto")
+
+                company = st.session_state.get("car_company", "")
+                category = st.session_state.get("car_category", "")
+                price = float(st.session_state.get("car_price", 0.0) or 0.0)
+                currency = st.session_state.get("car_currency", "MXN")
+
+                if company:
+                    st.write(f"**Arrendadora:** {company}")
+                if category:
+                    st.write(f"**Vehículo:** {category}")
+                st.write(f"**Precio:** {amount_text(price, currency)}")
+
+                render_charge("car", chargeable_services["Renta de auto"])
+
+                if st.button("Editar renta de auto", key="review_edit_car"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # TOUR
+        if "Tours o actividades" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### 🎟️ Tour o actividad")
+
+                tour_name = st.session_state.get("tour_name", "")
+                city = st.session_state.get("tour_city", "")
+                price = float(st.session_state.get("tour_price", 0.0) or 0.0)
+                currency = st.session_state.get("tour_currency", "MXN")
+
+                if tour_name:
+                    st.write(f"**Actividad:** {tour_name}")
+                if city:
+                    st.write(f"**Destino:** {city}")
+                st.write(f"**Precio:** {amount_text(price, currency)}")
+
+                render_charge("tour", chargeable_services["Tours o actividades"])
+
+                if st.button("Editar tour", key="review_edit_tour"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        # OTRO
+        if "Otro servicio" in draft["componentes"]:
+            with st.container(border=True):
+                st.markdown("##### ➕ Otro servicio")
+
+                service_name = st.session_state.get("other_service_name", "")
+                price = float(st.session_state.get("other_service_price", 0.0) or 0.0)
+                currency = st.session_state.get("other_service_currency", "MXN")
+
+                if service_name:
+                    st.write(f"**Servicio:** {service_name}")
+                st.write(f"**Precio:** {amount_text(price, currency)}")
+
+                render_charge("other", chargeable_services["Otro servicio"])
+
+                if st.button("Editar otro servicio", key="review_edit_other"):
+                    st.session_state.quote_step = 3
+                    st.rerun()
+
+        st.divider()
+        st.markdown("#### Cargos por servicio EVA")
+
+        charge_rows = []
+        total_charge_mxn = 0.0
+        service_charge_keys = [
+            ("Vuelos", "flights"),
+            ("Hospedaje", "hotel"),
+            ("Seguro de viaje", "insurance"),
+            ("Traslados", "transfer"),
+            ("Renta de auto", "car"),
+            ("Tours o actividades", "tour"),
+            ("Otro servicio", "other"),
+        ]
+
+        for label, key in service_charge_keys:
+            if label not in draft["componentes"]:
+                continue
+            amount = float(st.session_state.get(f"review_charge_amount_{key}", 0.0) or 0.0)
+            concept = st.session_state.get(f"review_charge_text_{key}", "")
+            if amount > 0:
+                charge_rows.append((label, concept or "Cargo por servicio", amount))
+                total_charge_mxn += amount
+
+        if charge_rows:
+            for label, concept, amount in charge_rows:
+                st.write(f"**{label}:** {concept} · ${amount:,.2f} MXN")
+            st.success(f"Total cargos EVA: ${total_charge_mxn:,.2f} MXN")
+        else:
+            st.caption("Esta cotización no tiene cargos por servicio.")
+
+        st.info(
+            "Los precios de servicios en monedas distintas se mantienen separados. "
+            "La conversión de moneda se incorporará en la siguiente etapa para evitar "
+            "sumas incorrectas."
+        )
+
         b1, b2 = st.columns(2)
-        if b1.button("Editar", use_container_width=True):
-            st.session_state.quote_step = 1
+        if b1.button("Volver a captura", use_container_width=True):
+            st.session_state.quote_step = 3
             st.rerun()
-        if b2.button("Continuar", type="primary", use_container_width=True):
+
+        if b2.button(
+            "Continuar a PDF y guardado",
+            type="primary",
+            use_container_width=True,
+        ):
             st.session_state.quote_step = 5
             st.rerun()
 
