@@ -4,6 +4,7 @@ from datetime import time
 from io import BytesIO
 from typing import Any
 
+import requests
 import streamlit as st
 
 try:
@@ -12,6 +13,7 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
     from reportlab.platypus import (
         Image as RLImage,
         Paragraph,
@@ -44,12 +46,13 @@ st.markdown(
       }
       .block-container {max-width: 1080px; padding-top: 1.2rem; padding-bottom: 7rem;}
       .sive-header {border: 1px solid var(--eva-border); background: var(--eva-soft); border-radius: 24px; padding: 1.4rem 1.5rem; margin-bottom: 1.2rem;}
-      .sive-kicker {color: var(--eva-accent); font-weight: 700; letter-spacing: .14em; text-transform: uppercase; font-size: .78rem;}
+      .sive-kicker {color: var(--eva-accent); font-weight: 700; letter-spacing: .14em; text-transform: uppercase; font-size: .78rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;}
       .sive-title {color: var(--eva-text); font-size: clamp(1.8rem, 4vw, 2.5rem); font-weight: 500; margin-top: .2rem;}
       .sive-subtitle {color: var(--eva-muted); margin-top: .2rem;}
       .sive-card {border: 1px solid var(--eva-border); border-radius: 20px; padding: 1rem 1.1rem; background: #fff; margin-bottom: .8rem;}
       .sive-card-title {font-size: 1.05rem; font-weight: 700; color: var(--eva-text);}
       .sive-card-text {color: var(--eva-muted); margin-top: .25rem;}
+      .sive-mono {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: .01em;}
       div[data-testid="stButton"] > button {
         min-height: 74px;
         border-radius: 18px;
@@ -81,6 +84,9 @@ def init_state() -> None:
             "viajero_existente": "",
             "capture_state": {},
             "hotel_image_cache": None,
+            "hotel_image_caches": {},
+            "hotel_options": 1,
+            "companions": [],
             "nombres": "",
             "apellido_paterno": "",
             "apellido_materno": "",
@@ -147,28 +153,30 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     buffer = BytesIO()
 
     teal = colors.HexColor("#2F9FA3")
-    soft = colors.HexColor("#F1F8F8")
-    line = colors.HexColor("#D7E3E3")
+    soft = colors.HexColor("#F4F8F8")
+    line = colors.HexColor("#D9E2E2")
     text_color = colors.HexColor("#2F3437")
     muted = colors.HexColor("#737B80")
+    dark = colors.HexColor("#202426")
 
     styles = getSampleStyleSheet()
     styles.add(
         ParagraphStyle(
             name="SIVETitle",
             fontName="Helvetica",
-            fontSize=19,
-            leading=21,
-            textColor=text_color,
+            fontSize=18,
+            leading=20,
+            textColor=dark,
         )
     )
     styles.add(
         ParagraphStyle(
             name="SIVESection",
             fontName="Helvetica-Bold",
-            fontSize=11,
+            fontSize=10.5,
             leading=13,
-            textColor=text_color,
+            textColor=dark,
+            spaceAfter=4,
         )
     )
     styles.add(
@@ -185,38 +193,84 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             name="SIVESmall",
             fontName="Helvetica",
             fontSize=6.8,
-            leading=8.2,
+            leading=8.3,
             textColor=muted,
         )
     )
     styles.add(
         ParagraphStyle(
+            name="SIVEMono",
+            fontName="Courier",
+            fontSize=7.7,
+            leading=9.5,
+            textColor=text_color,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVEMonoBold",
+            fontName="Courier-Bold",
+            fontSize=8.2,
+            leading=10,
+            textColor=dark,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
             name="SIVEPrice",
-            fontName="Helvetica-Bold",
-            fontSize=11,
-            leading=12.5,
+            fontName="Courier-Bold",
+            fontSize=10.5,
+            leading=12,
             textColor=teal,
             alignment=TA_RIGHT,
         )
     )
 
     def P(value, style="SIVEBody"):
-        return Paragraph(str(value or "—"), styles[style])
+        return Paragraph(str(value if value not in (None, "") else "—"), styles[style])
+
+    def money(amount: float, currency: str) -> str:
+        return f"{currency} {float(amount or 0):,.2f}"
+
+    def safe_image(source_bytes: bytes | None, source_url: str | None):
+        data = source_bytes
+        if not data and source_url:
+            try:
+                response = requests.get(source_url, timeout=5)
+                response.raise_for_status()
+                data = response.content
+            except Exception:
+                data = None
+        if not data:
+            return None
+
+        try:
+            bio = BytesIO(data)
+            image_reader = ImageReader(bio)
+            width, height = image_reader.getSize()
+            max_w = 67 * mm
+            max_h = 43 * mm
+            scale = min(max_w / width, max_h / height)
+            bio.seek(0)
+            return RLImage(bio, width=width * scale, height=height * scale)
+        except Exception:
+            return None
 
     if draft.get("modo_viajero") == "Buscar viajero existente":
-        traveler = draft.get("viajero_existente") or "Viajero"
+        principal = draft.get("viajero_existente") or "Viajero"
     else:
-        traveler = " ".join(
-            x
-            for x in [
+        principal = " ".join(
+            part
+            for part in [
                 draft.get("nombres", ""),
                 draft.get("apellido_paterno", ""),
                 draft.get("apellido_materno", ""),
             ]
-            if x
+            if part
         ) or "Viajero"
 
     traveler_count = max(int(draft.get("num_viajeros", 1) or 1), 1)
+    companions = list(draft.get("companions", []))
 
     doc = SimpleDocTemplate(
         buffer,
@@ -224,57 +278,118 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         leftMargin=14 * mm,
         rightMargin=14 * mm,
         topMargin=12 * mm,
-        bottomMargin=16 * mm,
+        bottomMargin=15 * mm,
+        title="Cotización Proyecto EVA",
     )
     story = []
 
-    header_table = Table(
+    header = Table(
         [
-            [P("PROYECTO EVA", "SIVESection"), P("COTIZACIÓN DE VIAJE", "SIVETitle")],
+            [P("PROYECTO EVA", "SIVEMonoBold"), P("COTIZACIÓN DE VIAJE", "SIVETitle")],
             [P("SIVE · Sistema Integral de Viajes EVA", "SIVESmall"), ""],
-            [P(f"Viajero principal: {traveler}", "SIVEBody"), P(f"Viajeros: {traveler_count}", "SIVEBody")],
         ],
-        colWidths=[75 * mm, 100 * mm],
+        colWidths=[74 * mm, 101 * mm],
     )
-    header_table.setStyle(
+    header.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("LINEBELOW", (0, 1), (-1, 1), 0.6, line),
                 ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
-                ("TOPPADDING", (0, 2), (-1, 2), 6),
             ]
         )
     )
-    story += [header_table, Spacer(1, 5 * mm)]
+    story += [header, Spacer(1, 4 * mm)]
+
+    pax_rows = [[P("PAX", "SIVEMonoBold"), P("VIAJERO", "SIVEMonoBold")]]
+    pax_rows.append([P("01", "SIVEMono"), P(principal, "SIVEBody")])
+    for idx in range(2, traveler_count + 1):
+        companion = companions[idx - 2] if idx - 2 < len(companions) else {}
+        name = companion.get("name", "").strip()
+        is_tba = companion.get("tba", False)
+        display = "TBA · Nombre por definir" if is_tba or not name else name
+        pax_rows.append([P(f"{idx:02d}", "SIVEMono"), P(display, "SIVEBody")])
+
+    pax_table = Table(pax_rows, colWidths=[18 * mm, 157 * mm])
+    pax_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), soft),
+                ("BOX", (0, 0), (-1, -1), 0.45, line),
+                ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story += [pax_table, Spacer(1, 5 * mm)]
 
     components = draft.get("componentes", [])
+    subtotals_by_currency: dict[str, float] = {}
+    total_eva_fees_mxn = 0.0
 
-    # Vuelos
+    def add_subtotal(currency: str, amount: float) -> None:
+        if amount:
+            subtotals_by_currency[currency] = subtotals_by_currency.get(currency, 0.0) + float(amount)
+
+    # -------------------- VUELOS --------------------
     if "Vuelos" in components:
-        story.append(P("Vuelos", "SIVESection"))
+        story.append(P("VUELOS", "SIVESection"))
+
         trip_type = captured_value("flight_trip_type", "Viaje sencillo")
-        flight_price = float(captured_value("flight_total_price", 0.0) or 0.0)
-        flight_currency = captured_value("flight_total_currency", "MXN")
+        flight_pax = max(int(captured_value("flight_pax", traveler_count) or traveler_count), 1)
+        price_basis = captured_value("flight_price_basis", "Total de la reserva")
+        entered_price = float(captured_value("flight_total_price", 0.0) or 0.0)
+        currency = captured_value("flight_total_currency", "MXN")
 
-        rows = [[P("Tipo de viaje"), P(trip_type)]]
+        if price_basis == "Precio por pasajero":
+            unit_price = entered_price
+            air_total = entered_price * flight_pax
+        else:
+            air_total = entered_price
+            unit_price = air_total / flight_pax if flight_pax else 0.0
 
-        route_candidates = [
-            ("outbound_origin_1", "outbound_destination_1"),
-            ("multicity_origin_1", "multicity_destination_1"),
-        ]
-        for origin_key, dest_key in route_candidates:
-            origin = captured_value(origin_key, "")
-            dest = captured_value(dest_key, "")
-            if origin or dest:
-                rows.append([P("Ruta"), P(f"{origin or '—'} → {dest or '—'}")])
-                break
+        add_subtotal(currency, air_total)
 
-        # Collect first few physical segments so the PDF is useful.
+        summary = Table(
+            [
+                [
+                    P("PAX", "SIVESmall"),
+                    P("TARIFA / PAX", "SIVESmall"),
+                    P("SUBTOTAL VUELOS", "SIVESmall"),
+                ],
+                [
+                    P(str(flight_pax), "SIVEMonoBold"),
+                    P(money(unit_price, currency), "SIVEMonoBold"),
+                    P(money(air_total, currency), "SIVEPrice"),
+                ],
+            ],
+            colWidths=[35 * mm, 65 * mm, 75 * mm],
+        )
+        summary.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), soft),
+                    ("BOX", (0, 0), (-1, -1), 0.5, line),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story += [P(f"Tipo de viaje: {trip_type}", "SIVESmall"), Spacer(1, 1.5 * mm), summary, Spacer(1, 2 * mm)]
+
         segment_rows = []
         for prefix in ("outbound", "return", "multicity"):
-            for idx in range(1, 7):
+            for idx in range(1, 10):
                 airline = captured_value(f"{prefix}_airline_{idx}", "")
                 number = captured_value(f"{prefix}_number_{idx}", "")
                 origin = captured_value(f"{prefix}_origin_{idx}", "")
@@ -283,35 +398,42 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 dep_time = captured_value(f"{prefix}_departure_time_{idx}", None)
                 arr_date = captured_value(f"{prefix}_arrival_date_{idx}", None)
                 arr_time = captured_value(f"{prefix}_arrival_time_{idx}", None)
+                fare = captured_value(f"{prefix}_fare_{idx}", "")
                 baggage = captured_value(f"{prefix}_baggage_{idx}", "")
 
                 if not any([airline, number, origin, destination, dep_date, arr_date]):
                     continue
 
-                dep_text = f"{dep_date or ''} {dep_time.strftime('%H:%M') if hasattr(dep_time, 'strftime') else dep_time or ''}".strip()
-                arr_text = f"{arr_date or ''} {arr_time.strftime('%H:%M') if hasattr(arr_time, 'strftime') else arr_time or ''}".strip()
+                dep_text = (
+                    f"{dep_date or ''} "
+                    f"{dep_time.strftime('%H:%M') if hasattr(dep_time, 'strftime') else dep_time or ''}"
+                ).strip()
+                arr_text = (
+                    f"{arr_date or ''} "
+                    f"{arr_time.strftime('%H:%M') if hasattr(arr_time, 'strftime') else arr_time or ''}"
+                ).strip()
 
                 segment_rows.append(
                     [
-                        P(f"{airline} {number}".strip() or "Vuelo"),
-                        P(f"{origin or '—'} → {destination or '—'}"),
-                        P(f"{dep_text}<br/>{arr_text}", "SIVESmall"),
-                        P(baggage or "Equipaje no especificado", "SIVESmall"),
+                        P(f"{airline} {number}".strip() or "Vuelo", "SIVEMono"),
+                        P(f"{origin or '—'} → {destination or '—'}", "SIVEMonoBold"),
+                        P(f"SAL {dep_text}<br/>LLE {arr_text}", "SIVESmall"),
+                        P(f"{fare or ''}<br/>{baggage or ''}".strip(), "SIVESmall"),
                     ]
                 )
 
         if segment_rows:
-            seg_table = Table(
-                [[P("Vuelo", "SIVESmall"), P("Ruta", "SIVESmall"), P("Salida / llegada", "SIVESmall"), P("Equipaje", "SIVESmall")]]
+            seg = Table(
+                [[P("VUELO", "SIVESmall"), P("RUTA", "SIVESmall"), P("HORARIO", "SIVESmall"), P("TARIFA / EQUIPAJE", "SIVESmall")]]
                 + segment_rows,
-                colWidths=[37 * mm, 43 * mm, 53 * mm, 42 * mm],
+                colWidths=[36 * mm, 43 * mm, 54 * mm, 42 * mm],
             )
-            seg_table.setStyle(
+            seg.setStyle(
                 TableStyle(
                     [
                         ("BACKGROUND", (0, 0), (-1, 0), soft),
-                        ("BOX", (0, 0), (-1, -1), 0.5, line),
-                        ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                        ("BOX", (0, 0), (-1, -1), 0.45, line),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
                         ("LEFTPADDING", (0, 0), (-1, -1), 5),
                         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
@@ -320,101 +442,141 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     ]
                 )
             )
-            story += [seg_table, Spacer(1, 2 * mm)]
-
-        rows.append(
-            [
-                P("Precio de la opción"),
-                P(f"{flight_currency} {flight_price:,.2f}" if flight_price else "Sin precio"),
-            ]
-        )
+            story += [seg, Spacer(1, 2 * mm)]
 
         fee = float(captured_value("review_charge_total_flights", 0.0) or 0.0)
         if fee:
-            rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
-
-        table = Table(rows, colWidths=[55 * mm, 120 * mm])
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BOX", (0, 0), (-1, -1), 0.5, line),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ]
-            )
-        )
-        story += [table, Spacer(1, 5 * mm)]
-
-    # Hospedaje
-    if "Hospedaje" in components:
-        story.append(P("Hospedaje", "SIVESection"))
-        hotel_name = captured_value("hotel_name_1", "")
-        city = captured_value("hotel_city_1", "")
-        checkin = captured_value("hotel_checkin_1", None)
-        checkout = captured_value("hotel_checkout_1", None)
-        hotel_price = float(captured_value("hotel_price_1", 0.0) or 0.0)
-        hotel_currency = captured_value("hotel_currency_1", "MXN")
-        room = captured_value("hotel_room_type_1", "")
-        board = captured_value("hotel_board_1", "")
-
-        nights = ""
-        if checkin and checkout:
-            diff = (checkout - checkin).days
-            if diff > 0:
-                nights = f"{diff} noche{'s' if diff != 1 else ''}"
-
-        hotel_rows = [
-            [P("Hotel"), P(hotel_name)],
-            [P("Destino"), P(city)],
-            [P("Habitación"), P(room)],
-            [P("Estancia"), P(f"{checkin or '—'} → {checkout or '—'} {('· ' + nights) if nights else ''}")],
-            [P("Alimentos"), P(board)],
-            [P("Precio"), P(f"{hotel_currency} {hotel_price:,.2f}" if hotel_price else "Sin precio")],
-        ]
-
-        fee = float(captured_value("review_charge_total_hotel", 0.0) or 0.0)
-        if fee:
-            hotel_rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
-
-        table = Table(hotel_rows, colWidths=[55 * mm, 120 * mm])
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BOX", (0, 0), (-1, -1), 0.5, line),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ]
-            )
-        )
-        story += [table]
-
-        # Compact hotel image when locally attached.
-        image_cache = draft.get("hotel_image_cache")
-        if image_cache and image_cache.get("bytes"):
-            try:
-                img_buffer = BytesIO(image_cache["bytes"])
-                img = RLImage(img_buffer, width=65 * mm, height=42 * mm)
-                story += [Spacer(1, 2 * mm), img]
-            except Exception:
-                pass
+            total_eva_fees_mxn += fee
+            story.append(P(f"Cargo por servicio EVA: MXN {fee:,.2f}", "SIVESmall"))
 
         story.append(Spacer(1, 5 * mm))
 
-    # Simple service cards
+    # -------------------- HOSPEDAJES --------------------
+    if "Hospedaje" in components:
+        hotel_options = max(int(draft.get("hotel_options", 1) or 1), 1)
+        caches = draft.get("hotel_image_caches", {}) or {}
+
+        for idx in range(1, hotel_options + 1):
+            hotel_name = captured_value(f"hotel_name_{idx}", "")
+            city = captured_value(f"hotel_city_{idx}", "")
+            checkin = captured_value(f"hotel_checkin_{idx}", None)
+            checkout = captured_value(f"hotel_checkout_{idx}", None)
+            room = captured_value(f"hotel_room_type_{idx}", "")
+            board = captured_value(f"hotel_board_{idx}", "")
+            rooms = int(captured_value(f"hotel_rooms_{idx}", 1) or 1)
+            guests = int(captured_value(f"hotel_guests_{idx}", 1) or 1)
+            price = float(captured_value(f"hotel_price_{idx}", 0.0) or 0.0)
+            currency = captured_value(f"hotel_currency_{idx}", "MXN")
+            hotel_url = captured_value(f"hotel_url_{idx}", "")
+            map_url = captured_value(f"hotel_map_url_{idx}", "")
+            image_url = captured_value(f"hotel_image_url_{idx}", "")
+
+            if not any([hotel_name, city, price, checkin, checkout]):
+                continue
+
+            add_subtotal(currency, price)
+            nights = (checkout - checkin).days if checkin and checkout else 0
+            average = price / nights if price and nights > 0 else 0.0
+
+            story.append(P(f"HOSPEDAJE · OPCIÓN {idx}", "SIVESection"))
+
+            price_box = Table(
+                [
+                    [
+                        P("NOCHES", "SIVESmall"),
+                        P("HABITACIONES", "SIVESmall"),
+                        P("PROMEDIO / NOCHE", "SIVESmall"),
+                        P("TOTAL HOTEL", "SIVESmall"),
+                    ],
+                    [
+                        P(str(nights if nights > 0 else "—"), "SIVEMonoBold"),
+                        P(str(rooms), "SIVEMonoBold"),
+                        P(money(average, currency) if average else "—", "SIVEMonoBold"),
+                        P(money(price, currency) if price else "—", "SIVEPrice"),
+                    ],
+                ],
+                colWidths=[35 * mm, 40 * mm, 50 * mm, 50 * mm],
+            )
+            price_box.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), soft),
+                        ("BOX", (0, 0), (-1, -1), 0.45, line),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ]
+                )
+            )
+
+            details = Table(
+                [
+                    [P("Hotel", "SIVESmall"), P(hotel_name)],
+                    [P("Destino", "SIVESmall"), P(city)],
+                    [P("Habitación", "SIVESmall"), P(room)],
+                    [P("Huéspedes", "SIVESmall"), P(str(guests))],
+                    [P("Estancia", "SIVESmall"), P(f"{checkin or '—'} → {checkout or '—'}")],
+                    [P("Alimentos", "SIVESmall"), P(board)],
+                ],
+                colWidths=[34 * mm, 79 * mm],
+            )
+            details.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LINEBELOW", (0, 0), (-1, -2), 0.25, line),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ]
+                )
+            )
+
+            cache = caches.get(str(idx)) or caches.get(idx)
+            if idx == 1 and not cache and draft.get("hotel_image_cache"):
+                cache = draft.get("hotel_image_cache")
+            image_bytes = cache.get("bytes") if isinstance(cache, dict) else None
+            image = safe_image(image_bytes, image_url)
+
+            if image:
+                hotel_block = Table([[details, image]], colWidths=[113 * mm, 62 * mm])
+                hotel_block.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+                story += [hotel_block, Spacer(1, 2 * mm)]
+            else:
+                story += [details, Spacer(1, 2 * mm)]
+
+            links = []
+            if hotel_url:
+                links.append(f'<a href="{hotel_url}" color="#2F9FA3">Página del hotel</a>')
+            if map_url:
+                links.append(f'<a href="{map_url}" color="#2F9FA3">Ver ubicación en Google Maps</a>')
+            if links:
+                story.append(Paragraph("  ·  ".join(links), styles["SIVESmall"]))
+                story.append(Spacer(1, 2 * mm))
+
+            story += [price_box, Spacer(1, 2 * mm)]
+
+            # The hotel fee is a section-level charge; show it only once.
+            if idx == hotel_options:
+                fee = float(captured_value("review_charge_total_hotel", 0.0) or 0.0)
+                if fee:
+                    total_eva_fees_mxn += fee
+                    story.append(P(f"Cargo por servicio EVA: MXN {fee:,.2f}", "SIVESmall"))
+
+            story.append(Spacer(1, 5 * mm))
+
+    # -------------------- SERVICIOS --------------------
     service_specs = [
-        ("Seguro de viaje", "Seguro de viaje", "insurance_price", "insurance_currency", "review_charge_total_insurance"),
-        ("Traslados", "Traslado", "transfer_price", "transfer_currency", "review_charge_total_transfer"),
-        ("Renta de auto", "Renta de auto", "car_price", "car_currency", "review_charge_total_car"),
-        ("Tours o actividades", "Tour o actividad", "tour_price", "tour_currency", "review_charge_total_tour"),
-        ("Otro servicio", "Otro servicio", "other_service_price", "other_service_currency", "review_charge_total_other"),
+        ("Seguro de viaje", "SEGURO DE VIAJE", "insurance_price", "insurance_currency", "review_charge_total_insurance"),
+        ("Traslados", "TRASLADO", "transfer_price", "transfer_currency", "review_charge_total_transfer"),
+        ("Renta de auto", "RENTA DE AUTO", "car_price", "car_currency", "review_charge_total_car"),
+        ("Tours o actividades", "TOUR O ACTIVIDAD", "tour_price", "tour_currency", "review_charge_total_tour"),
+        ("Otro servicio", "OTRO SERVICIO", "other_service_price", "other_service_currency", "review_charge_total_other"),
     ]
 
     for component, title, price_key, currency_key, fee_key in service_specs:
@@ -424,8 +586,9 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         price = float(captured_value(price_key, 0.0) or 0.0)
         currency = captured_value(currency_key, "MXN")
         fee = float(captured_value(fee_key, 0.0) or 0.0)
+        add_subtotal(currency, price)
+        total_eva_fees_mxn += fee
 
-        details = []
         if component == "Seguro de viaje":
             details = [
                 ("Proveedor", captured_value("insurance_provider", "")),
@@ -453,29 +616,67 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 ("Descripción", captured_value("other_service_description", "")),
             ]
 
-        rows = [[P(label), P(value)] for label, value in details if value]
-        rows.append([P("Precio"), P(f"{currency} {price:,.2f}" if price else "Sin precio")])
+        rows = [[P(label, "SIVESmall"), P(value)] for label, value in details if value]
+        rows.append([P("Subtotal", "SIVESmall"), P(money(price, currency), "SIVEMonoBold")])
         if fee:
-            rows.append([P("Cargo por servicio EVA"), P(f"MXN {fee:,.2f}")])
+            rows.append([P("Cargo EVA", "SIVESmall"), P(f"MXN {fee:,.2f}", "SIVEMonoBold")])
 
         story.append(P(title, "SIVESection"))
-        table = Table(rows, colWidths=[55 * mm, 120 * mm])
+        table = Table(rows, colWidths=[45 * mm, 130 * mm])
         table.setStyle(
             TableStyle(
                 [
-                    ("BOX", (0, 0), (-1, -1), 0.5, line),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.35, line),
+                    ("BOX", (0, 0), (-1, -1), 0.45, line),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                 ]
             )
         )
         story += [table, Spacer(1, 5 * mm)]
 
-    # Footer note
+    # -------------------- RESUMEN ECONÓMICO --------------------
+    story.append(P("RESUMEN ECONÓMICO", "SIVESection"))
+
+    summary_rows = [[P("CONCEPTO", "SIVEMonoBold"), P("IMPORTE", "SIVEMonoBold")]]
+    for currency, amount in sorted(subtotals_by_currency.items()):
+        summary_rows.append([P(f"Servicios cotizados · {currency}"), P(money(amount, currency), "SIVEMonoBold")])
+
+    if total_eva_fees_mxn:
+        summary_rows.append([P("Cargos por servicio EVA · MXN"), P(f"MXN {total_eva_fees_mxn:,.2f}", "SIVEMonoBold")])
+
+    # Only combine into one grand total when every service is MXN.
+    if subtotals_by_currency and set(subtotals_by_currency.keys()) == {"MXN"}:
+        grand_total = subtotals_by_currency["MXN"] + total_eva_fees_mxn
+        summary_rows.append([P("TOTAL GENERAL", "SIVEMonoBold"), P(f"MXN {grand_total:,.2f}", "SIVEPrice")])
+    else:
+        summary_rows.append(
+            [
+                P("TOTAL", "SIVEMonoBold"),
+                P("Se presenta por moneda para evitar conversiones implícitas.", "SIVESmall"),
+            ]
+        )
+
+    summary_table = Table(summary_rows, colWidths=[105 * mm, 70 * mm])
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), soft),
+                ("BOX", (0, 0), (-1, -1), 0.55, line),
+                ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+    story += [summary_table, Spacer(1, 5 * mm)]
+
     story.append(
         P(
             "Precios sujetos a disponibilidad y cambios sin previo aviso. "
@@ -552,15 +753,19 @@ def page_new_quote() -> None:
             if not is_capture_key(str(key)):
                 continue
 
-            # Uploaded files need their bytes preserved separately.
-            if key == "hotel_image_1":
+            # Uploaded hotel files need their bytes preserved separately.
+            if str(key).startswith("hotel_image_") and not str(key).startswith("hotel_image_url_"):
                 if value is not None:
                     try:
-                        draft["hotel_image_cache"] = {
+                        hotel_idx = str(key).rsplit("_", 1)[-1]
+                        draft.setdefault("hotel_image_caches", {})
+                        draft["hotel_image_caches"][hotel_idx] = {
                             "name": getattr(value, "name", "hotel.jpg"),
                             "type": getattr(value, "type", "image/jpeg"),
                             "bytes": value.getvalue(),
                         }
+                        if hotel_idx == "1":
+                            draft["hotel_image_cache"] = draft["hotel_image_caches"][hotel_idx]
                     except Exception:
                         pass
                 continue
@@ -648,6 +853,49 @@ def page_new_quote() -> None:
             value=draft["correo"],
         )
 
+        st.divider()
+        st.markdown("#### Viajeros incluidos")
+        num_viajeros = st.number_input(
+            "Número de viajeros",
+            min_value=1,
+            value=max(int(draft.get("num_viajeros", 1) or 1), 1),
+            step=1,
+            help="Incluye al viajero principal.",
+            key="step1_num_viajeros",
+        )
+
+        companions: list[dict[str, Any]] = []
+        if int(num_viajeros) > 1:
+            st.caption(
+                "Si todavía no conoces el nombre de un acompañante, usa TBA "
+                "(To Be Advised / nombre por definir)."
+            )
+            existing_companions = list(draft.get("companions", []))
+
+            for pax_idx in range(2, int(num_viajeros) + 1):
+                saved = (
+                    existing_companions[pax_idx - 2]
+                    if pax_idx - 2 < len(existing_companions)
+                    else {}
+                )
+                with st.container(border=True):
+                    st.markdown(f"**PAX {pax_idx:02d}**")
+                    name_col, tba_col = st.columns([2.2, 1])
+                    companion_name = name_col.text_input(
+                        "Nombre completo",
+                        value=saved.get("name", ""),
+                        placeholder="Exactamente como aparece en pasaporte",
+                        key=f"companion_name_{pax_idx}",
+                    )
+                    companion_tba = tba_col.checkbox(
+                        "Nombre por definir (TBA)",
+                        value=bool(saved.get("tba", False)),
+                        key=f"companion_tba_{pax_idx}",
+                    )
+                    companions.append(
+                        {"name": companion_name.strip(), "tba": bool(companion_tba)}
+                    )
+
         if st.button("Continuar", type="primary", use_container_width=True):
             if modo_viajero == "Buscar viajero existente":
                 if not viajero_existente.strip():
@@ -669,6 +917,8 @@ def page_new_quote() -> None:
             draft["cliente_contacto"] = contact.strip()
             draft["telefono"] = phone.strip()
             draft["correo"] = email.strip()
+            draft["num_viajeros"] = int(num_viajeros)
+            draft["companions"] = companions
             st.session_state.quote_step = 2
             st.rerun()
 
@@ -717,10 +967,11 @@ def page_new_quote() -> None:
             "_arrival_time_",
         )
         explicit_default_keys = {
-            "hotel_checkin_1",
-            "hotel_checkout_1",
-            "hotel_rooms_1",
-            "hotel_guests_1",
+            *{
+                f"hotel_{field}_{idx}"
+                for idx in range(1, max(int(draft.get("hotel_options", 1) or 1), 1) + 1)
+                for field in ("checkin", "checkout", "rooms", "guests")
+            },
             "insurance_start",
             "insurance_end",
             "insurance_people",
@@ -921,186 +1172,264 @@ def page_new_quote() -> None:
                     st.rerun()
 
             st.markdown("### Precio de la opción")
+            st.caption(
+                "Captura exactamente lo que muestra la aerolínea. SIVE hará el desglose."
+            )
+
+            pax_col, basis_col = st.columns([1, 1.5])
+            flight_pax = pax_col.number_input(
+                "PAX en esta opción",
+                min_value=1,
+                value=max(
+                    int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1),
+                    1,
+                ),
+                step=1,
+                key="flight_pax",
+            )
+            price_basis = basis_col.radio(
+                "El precio capturado corresponde a",
+                ["Total de la reserva", "Precio por pasajero"],
+                horizontal=True,
+                key="flight_price_basis",
+            )
+
             price_col, currency_col = st.columns([1.4, 1])
-            price_col.number_input(
-                "Precio total mostrado por la aerolínea",
+            entered_flight_price = price_col.number_input(
+                "Importe mostrado por la aerolínea",
                 min_value=0.0,
                 step=100.0,
                 key="flight_total_price",
             )
-            currency_col.selectbox(
+            flight_currency = currency_col.selectbox(
                 "Moneda",
                 ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
                 key="flight_total_currency",
             )
 
+            if price_basis == "Precio por pasajero":
+                fare_per_pax = float(entered_flight_price)
+                flight_subtotal = float(entered_flight_price) * int(flight_pax)
+            else:
+                flight_subtotal = float(entered_flight_price)
+                fare_per_pax = (
+                    flight_subtotal / int(flight_pax)
+                    if int(flight_pax) > 0
+                    else 0.0
+                )
+
+            if entered_flight_price > 0:
+                st.markdown(
+                    f"""
+                    <div class="sive-card">
+                      <div class="sive-kicker">DESGLOSE DE VUELO</div>
+                      <div class="sive-card-text">
+                        <span class="sive-mono">PAX {int(flight_pax):02d}</span>
+                        &nbsp;·&nbsp;
+                        Tarifa por pasajero <strong>{flight_currency} {fare_per_pax:,.2f}</strong>
+                        &nbsp;·&nbsp;
+                        Subtotal vuelos <strong>{flight_currency} {flight_subtotal:,.2f}</strong>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
         if "Hospedaje" in draft["componentes"]:
             st.markdown("#### Hospedaje")
 
-            hotel_name = st.text_input(
-                "Nombre del hotel *",
-                placeholder="Ej. JW Marriott Hotel Lima",
-                key="hotel_name_1",
-            )
+            draft["hotel_options"] = max(int(draft.get("hotel_options", 1) or 1), 1)
+            draft.setdefault("hotel_image_caches", {})
 
-            city_col, room_col = st.columns([1.3, 1])
-            hotel_city = city_col.text_input(
-                "Ciudad o destino *",
-                placeholder="Ej. Lima",
-                key="hotel_city_1",
-            )
-            room_type = room_col.text_input(
-                "Tipo de habitación",
-                placeholder="Ej. Deluxe King",
-                key="hotel_room_type_1",
-            )
+            def render_hotel_option(hotel_idx: int) -> None:
+                with st.container(border=True):
+                    st.markdown(f"##### Opción de hospedaje {hotel_idx}")
 
-            st.caption("Estancia")
-            checkin_col, checkout_col = st.columns(2)
-            checkin = checkin_col.date_input(
-                "Entrada *",
-                value=captured("hotel_checkin_1", None),
-                key="hotel_checkin_1",
-            )
-            checkout = checkout_col.date_input(
-                "Salida *",
-                value=captured("hotel_checkout_1", None),
-                key="hotel_checkout_1",
-            )
+                    hotel_name = st.text_input(
+                        "Nombre del hotel *",
+                        placeholder="Ej. JW Marriott Hotel Lima",
+                        key=f"hotel_name_{hotel_idx}",
+                    )
 
-            if checkin and checkout:
-                nights = (checkout - checkin).days
-                if nights > 0:
-                    st.success(f"{nights} noche{'s' if nights != 1 else ''}")
-                else:
-                    st.warning("La fecha de salida debe ser posterior a la entrada.")
-                    nights = 0
-            else:
-                nights = 0
+                    city_col, room_col = st.columns([1.3, 1])
+                    hotel_city = city_col.text_input(
+                        "Ciudad o destino *",
+                        placeholder="Ej. Lima",
+                        key=f"hotel_city_{hotel_idx}",
+                    )
+                    room_col.text_input(
+                        "Tipo de habitación",
+                        placeholder="Ej. Deluxe King",
+                        key=f"hotel_room_type_{hotel_idx}",
+                    )
 
-            rooms_col, guests_col = st.columns(2)
-            rooms = rooms_col.number_input(
-                "Habitaciones",
-                min_value=1,
-                value=int(captured("hotel_rooms_1", 1)),
-                step=1,
-                key="hotel_rooms_1",
-            )
-            guests = guests_col.number_input(
-                "Huéspedes",
-                min_value=1,
-                value=int(captured("hotel_guests_1", 1)),
-                step=1,
-                key="hotel_guests_1",
-            )
+                    st.caption("Estancia")
+                    checkin_col, checkout_col = st.columns(2)
+                    checkin = checkin_col.date_input(
+                        "Entrada *",
+                        value=captured(f"hotel_checkin_{hotel_idx}", None),
+                        key=f"hotel_checkin_{hotel_idx}",
+                    )
+                    checkout = checkout_col.date_input(
+                        "Salida *",
+                        value=captured(f"hotel_checkout_{hotel_idx}", None),
+                        key=f"hotel_checkout_{hotel_idx}",
+                    )
 
-            board_col, cancellation_col = st.columns(2)
-            board = board_col.selectbox(
-                "Alimentos incluidos",
-                [
-                    "Sin alimentos",
-                    "Desayuno incluido",
-                    "Media pensión",
-                    "Pensión completa",
-                    "Todo incluido",
-                    "Otro",
-                ],
-                key="hotel_board_1",
-            )
-            cancellation = cancellation_col.text_input(
-                "Política de cancelación",
-                placeholder="Ej. Cancelación gratuita hasta...",
-                key="hotel_cancellation_1",
-            )
+                    if checkin and checkout:
+                        nights = (checkout - checkin).days
+                        if nights > 0:
+                            st.success(f"{nights} noche{'s' if nights != 1 else ''}")
+                        else:
+                            st.warning("La fecha de salida debe ser posterior a la entrada.")
+                            nights = 0
+                    else:
+                        nights = 0
 
-            st.caption("Precio")
-            price_col, currency_col = st.columns([1.4, 1])
-            hotel_price = price_col.number_input(
-                "Precio total mostrado",
-                min_value=0.0,
-                step=100.0,
-                key="hotel_price_1",
-            )
-            hotel_currency = currency_col.selectbox(
-                "Moneda",
-                ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
-                key="hotel_currency_1",
-            )
+                    rooms_col, guests_col = st.columns(2)
+                    rooms_col.number_input(
+                        "Habitaciones",
+                        min_value=1,
+                        value=int(captured(f"hotel_rooms_{hotel_idx}", 1)),
+                        step=1,
+                        key=f"hotel_rooms_{hotel_idx}",
+                    )
+                    guests_col.number_input(
+                        "Huéspedes",
+                        min_value=1,
+                        value=int(captured(f"hotel_guests_{hotel_idx}", draft.get("num_viajeros", 1))),
+                        step=1,
+                        key=f"hotel_guests_{hotel_idx}",
+                    )
 
-            if nights > 0 and hotel_price > 0:
-                average_night = hotel_price / nights
-                st.info(
-                    f"Promedio por noche: ${average_night:,.2f} {hotel_currency}"
-                )
+                    board_col, cancellation_col = st.columns(2)
+                    board_col.selectbox(
+                        "Alimentos incluidos",
+                        [
+                            "Sin alimentos",
+                            "Desayuno incluido",
+                            "Media pensión",
+                            "Pensión completa",
+                            "Todo incluido",
+                            "Otro",
+                        ],
+                        key=f"hotel_board_{hotel_idx}",
+                    )
+                    cancellation_col.text_input(
+                        "Política de cancelación",
+                        placeholder="Ej. Cancelación gratuita hasta...",
+                        key=f"hotel_cancellation_{hotel_idx}",
+                    )
 
-            st.caption("Imagen del hotel")
-            hotel_image = st.file_uploader(
-                "Adjuntar imagen",
-                type=["png", "jpg", "jpeg", "webp"],
-                key="hotel_image_1",
-            )
-            hotel_image_url = st.text_input(
-                "O pega el enlace de una imagen",
-                placeholder="https://...",
-                key="hotel_image_url_1",
-            )
+                    st.caption("Precio")
+                    price_col, currency_col = st.columns([1.4, 1])
+                    hotel_price = price_col.number_input(
+                        "Precio total mostrado",
+                        min_value=0.0,
+                        step=100.0,
+                        key=f"hotel_price_{hotel_idx}",
+                    )
+                    hotel_currency = currency_col.selectbox(
+                        "Moneda",
+                        ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
+                        key=f"hotel_currency_{hotel_idx}",
+                    )
 
-            if hotel_image is not None:
-                try:
-                    draft["hotel_image_cache"] = {
-                        "name": getattr(hotel_image, "name", "hotel.jpg"),
-                        "type": getattr(hotel_image, "type", "image/jpeg"),
-                        "bytes": hotel_image.getvalue(),
-                    }
-                except Exception:
-                    pass
-
-            preview_source = None
-            preview_caption = hotel_name or "Vista previa del hotel"
-
-            if hotel_image is not None:
-                preview_source = hotel_image
-            elif draft.get("hotel_image_cache"):
-                preview_source = draft["hotel_image_cache"]["bytes"]
-                st.caption("Imagen adjunta conservada. Puedes cargar otra para reemplazarla.")
-            elif hotel_image_url:
-                preview_source = hotel_image_url
-
-            if preview_source is not None:
-                try:
-                    preview_col, _ = st.columns([1, 2.2])
-                    with preview_col:
-                        st.image(
-                            preview_source,
-                            caption=preview_caption,
-                            width=230,
+                    if nights > 0 and hotel_price > 0:
+                        st.info(
+                            f"Promedio por noche: {hotel_currency} "
+                            f"{hotel_price / nights:,.2f}"
                         )
-                except Exception:
-                    st.warning("No pudimos mostrar la vista previa de esa imagen.")
 
-            links_col1, links_col2 = st.columns(2)
-            hotel_url = links_col1.text_input(
-                "Página del hotel",
-                placeholder="https://...",
-                key="hotel_url_1",
-            )
-            map_url = links_col2.text_input(
-                "Ubicación en Maps",
-                placeholder="https://maps.google.com/...",
-                key="hotel_map_url_1",
-            )
+                    st.caption("Imagen del hotel")
+                    hotel_image = st.file_uploader(
+                        "Adjuntar imagen",
+                        type=["png", "jpg", "jpeg", "webp"],
+                        key=f"hotel_image_{hotel_idx}",
+                    )
+                    hotel_image_url = st.text_input(
+                        "O pega el enlace de una imagen",
+                        placeholder="https://...",
+                        key=f"hotel_image_url_{hotel_idx}",
+                    )
 
-            hotel_notes = st.text_area(
-                "Condiciones y observaciones",
-                placeholder="Incluye impuestos, resort fee, horarios de check-in, etc.",
-                key="hotel_notes_1",
-            )
+                    if hotel_image is not None:
+                        try:
+                            draft["hotel_image_caches"][str(hotel_idx)] = {
+                                "name": getattr(hotel_image, "name", "hotel.jpg"),
+                                "type": getattr(hotel_image, "type", "image/jpeg"),
+                                "bytes": hotel_image.getvalue(),
+                            }
+                            if hotel_idx == 1:
+                                draft["hotel_image_cache"] = draft["hotel_image_caches"][str(hotel_idx)]
+                        except Exception:
+                            pass
 
-            st.button(
+                    cache = draft["hotel_image_caches"].get(str(hotel_idx))
+                    if hotel_idx == 1 and not cache:
+                        cache = draft.get("hotel_image_cache")
+
+                    preview_source = None
+                    if hotel_image is not None:
+                        preview_source = hotel_image
+                    elif cache and cache.get("bytes"):
+                        preview_source = cache["bytes"]
+                        st.caption("Imagen adjunta conservada. Puedes reemplazarla.")
+                    elif hotel_image_url:
+                        preview_source = hotel_image_url
+
+                    if preview_source is not None:
+                        try:
+                            preview_col, _ = st.columns([1, 2.4])
+                            with preview_col:
+                                st.image(
+                                    preview_source,
+                                    caption=hotel_name or "Vista previa",
+                                    width=220,
+                                )
+                        except Exception:
+                            st.warning("No pudimos mostrar la vista previa de esa imagen.")
+
+                    links_col1, links_col2 = st.columns(2)
+                    links_col1.text_input(
+                        "Página del hotel",
+                        placeholder="https://...",
+                        key=f"hotel_url_{hotel_idx}",
+                    )
+                    links_col2.text_input(
+                        "Ubicación en Maps",
+                        placeholder="https://maps.google.com/...",
+                        key=f"hotel_map_url_{hotel_idx}",
+                    )
+
+                    st.text_area(
+                        "Condiciones y observaciones",
+                        placeholder="Incluye impuestos, resort fee, horarios de check-in, etc.",
+                        key=f"hotel_notes_{hotel_idx}",
+                    )
+
+            for hotel_idx in range(1, draft["hotel_options"] + 1):
+                render_hotel_option(hotel_idx)
+
+            add_hotel_col, remove_hotel_col = st.columns(2)
+            if add_hotel_col.button(
                 "+ Agregar otra opción de hospedaje",
                 use_container_width=True,
                 key="add_hotel_option",
-            )
+            ):
+                persist_capture_state()
+                draft["hotel_options"] += 1
+                st.rerun()
+
+            if remove_hotel_col.button(
+                "Quitar última opción",
+                use_container_width=True,
+                disabled=draft["hotel_options"] <= 1,
+                key="remove_hotel_option",
+            ):
+                persist_capture_state()
+                draft["hotel_options"] -= 1
+                st.rerun()
 
         other_services = [
             item
@@ -1475,14 +1804,22 @@ def page_new_quote() -> None:
             "Verifica que el nombre esté escrito exactamente como aparece en su documento.",
         )
 
-        traveler_count = st.number_input(
-            "Viajeros incluidos en esta cotización",
-            min_value=1,
-            value=max(int(draft.get("num_viajeros", 1) or 1), 1),
-            step=1,
-            key="review_traveler_count",
+        traveler_count = max(int(draft.get("num_viajeros", 1) or 1), 1)
+        st.markdown(
+            f'<div class="sive-mono">PAX {traveler_count:02d}</div>',
+            unsafe_allow_html=True,
         )
-        draft["num_viajeros"] = int(traveler_count)
+
+        companions = list(draft.get("companions", []))
+        if traveler_count > 1:
+            traveler_lines = []
+            for idx in range(2, traveler_count + 1):
+                companion = companions[idx - 2] if idx - 2 < len(companions) else {}
+                name = companion.get("name", "").strip()
+                if companion.get("tba", False) or not name:
+                    name = "TBA · Nombre por definir"
+                traveler_lines.append(f"**PAX {idx:02d}:** {name}")
+            st.markdown("  \n".join(traveler_lines))
 
         st.markdown("#### Resumen de la cotización")
         st.caption(
@@ -1581,9 +1918,34 @@ def page_new_quote() -> None:
                 trip_type = captured("flight_trip_type", "Viaje sencillo")
                 st.write(f"**Tipo de viaje:** {trip_type}")
 
-                flight_price = float(captured("flight_total_price", 0.0) or 0.0)
+                flight_pax = max(
+                    int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1),
+                    1,
+                )
+                entered_price = float(captured("flight_total_price", 0.0) or 0.0)
                 flight_currency = captured("flight_total_currency", "MXN")
-                st.write(f"**Precio:** {amount_text(flight_price, flight_currency)}")
+                price_basis = captured("flight_price_basis", "Total de la reserva")
+
+                if price_basis == "Precio por pasajero":
+                    fare_per_pax = entered_price
+                    flight_subtotal = entered_price * flight_pax
+                else:
+                    flight_subtotal = entered_price
+                    fare_per_pax = flight_subtotal / flight_pax if flight_pax else 0.0
+
+                st.markdown(
+                    f"""
+                    <div class="sive-card">
+                      <div class="sive-kicker">PRECIO DE VUELOS</div>
+                      <div class="sive-card-text">
+                        <span class="sive-mono">PAX {flight_pax:02d}</span><br>
+                        Tarifa por pasajero: <strong>{flight_currency} {fare_per_pax:,.2f}</strong><br>
+                        Subtotal vuelos: <strong>{flight_currency} {flight_subtotal:,.2f}</strong>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
                 # Mostrar ruta principal si existe
                 route_candidates = [
@@ -1608,22 +1970,36 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### 🏨 Hospedaje")
 
-                hotel_name = captured("hotel_name_1", "")
-                hotel_city = captured("hotel_city_1", "")
-                checkin = captured("hotel_checkin_1")
-                checkout = captured("hotel_checkout_1")
-                hotel_price = float(captured("hotel_price_1", 0.0) or 0.0)
-                hotel_currency = captured("hotel_currency_1", "MXN")
+                hotel_options = max(int(draft.get("hotel_options", 1) or 1), 1)
+                any_hotel = False
 
-                if hotel_name:
-                    st.write(f"**Hotel:** {hotel_name}")
-                if hotel_city:
-                    st.write(f"**Destino:** {hotel_city}")
-                if checkin and checkout:
-                    nights = (checkout - checkin).days
-                    if nights > 0:
-                        st.write(f"**Estancia:** {nights} noche{'s' if nights != 1 else ''}")
-                st.write(f"**Precio:** {amount_text(hotel_price, hotel_currency)}")
+                for hotel_idx in range(1, hotel_options + 1):
+                    hotel_name = captured(f"hotel_name_{hotel_idx}", "")
+                    hotel_city = captured(f"hotel_city_{hotel_idx}", "")
+                    checkin = captured(f"hotel_checkin_{hotel_idx}")
+                    checkout = captured(f"hotel_checkout_{hotel_idx}")
+                    hotel_price = float(captured(f"hotel_price_{hotel_idx}", 0.0) or 0.0)
+                    hotel_currency = captured(f"hotel_currency_{hotel_idx}", "MXN")
+
+                    if not any([hotel_name, hotel_city, checkin, checkout, hotel_price]):
+                        continue
+
+                    any_hotel = True
+                    st.markdown(f"**Opción {hotel_idx} · {hotel_name or 'Hotel'}**")
+                    if hotel_city:
+                        st.caption(hotel_city)
+                    if checkin and checkout:
+                        nights = (checkout - checkin).days
+                        if nights > 0:
+                            st.write(f"{nights} noche{'s' if nights != 1 else ''}")
+                    st.write(
+                        f"**Precio:** {amount_text(hotel_price, hotel_currency)}"
+                    )
+                    if hotel_idx < hotel_options:
+                        st.divider()
+
+                if not any_hotel:
+                    st.caption("No hay datos de hospedaje capturados.")
 
                 render_charge("hotel", chargeable_services["Hospedaje"])
 
@@ -1740,6 +2116,48 @@ def page_new_quote() -> None:
                     st.rerun()
 
         st.divider()
+        st.markdown("#### Resumen económico")
+        st.caption("Precios base antes de cargos EVA.")
+
+        review_totals: dict[str, float] = {}
+
+        def add_review_total(currency: str, amount: float) -> None:
+            if amount:
+                review_totals[currency] = review_totals.get(currency, 0.0) + float(amount)
+
+        if "Vuelos" in draft["componentes"]:
+            flight_pax = max(int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1), 1)
+            entered = float(captured("flight_total_price", 0.0) or 0.0)
+            currency = captured("flight_total_currency", "MXN")
+            basis = captured("flight_price_basis", "Total de la reserva")
+            flight_subtotal = entered * flight_pax if basis == "Precio por pasajero" else entered
+            add_review_total(currency, flight_subtotal)
+            st.write(f"**Vuelos:** {currency} {flight_subtotal:,.2f}")
+
+        if "Hospedaje" in draft["componentes"]:
+            for hotel_idx in range(1, max(int(draft.get("hotel_options", 1) or 1), 1) + 1):
+                amount = float(captured(f"hotel_price_{hotel_idx}", 0.0) or 0.0)
+                currency = captured(f"hotel_currency_{hotel_idx}", "MXN")
+                if amount:
+                    add_review_total(currency, amount)
+                    st.write(f"**Hospedaje · opción {hotel_idx}:** {currency} {amount:,.2f}")
+
+        review_service_specs = [
+            ("Seguro de viaje", "Seguro", "insurance_price", "insurance_currency"),
+            ("Traslados", "Traslado", "transfer_price", "transfer_currency"),
+            ("Renta de auto", "Renta de auto", "car_price", "car_currency"),
+            ("Tours o actividades", "Tour / actividad", "tour_price", "tour_currency"),
+            ("Otro servicio", "Otro servicio", "other_service_price", "other_service_currency"),
+        ]
+        for component, label, price_key, currency_key in review_service_specs:
+            if component in draft["componentes"]:
+                amount = float(captured(price_key, 0.0) or 0.0)
+                currency = captured(currency_key, "MXN")
+                if amount:
+                    add_review_total(currency, amount)
+                    st.write(f"**{label}:** {currency} {amount:,.2f}")
+
+        st.divider()
         st.markdown("#### Cargos por servicio EVA")
 
         charge_rows = []
@@ -1773,11 +2191,34 @@ def page_new_quote() -> None:
         else:
             st.caption("Esta cotización no tiene cargos por servicio.")
 
-        st.info(
-            "Los precios de servicios en monedas distintas se mantienen separados. "
-            "La conversión de moneda se incorporará en la siguiente etapa para evitar "
-            "sumas incorrectas."
-        )
+        st.markdown("#### Total de la cotización")
+        if review_totals:
+            if set(review_totals.keys()) == {"MXN"}:
+                grand_total = review_totals["MXN"] + total_charge_mxn
+                st.markdown(
+                    f"""
+                    <div class="sive-card">
+                      <div class="sive-kicker">TOTAL GENERAL</div>
+                      <div class="sive-title sive-mono" style="font-size:1.6rem;">
+                        MXN {grand_total:,.2f}
+                      </div>
+                      <div class="sive-card-text">
+                        Servicios MXN {review_totals['MXN']:,.2f}
+                        + cargos EVA MXN {total_charge_mxn:,.2f}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                for currency, amount in sorted(review_totals.items()):
+                    st.write(f"**Subtotal {currency}:** {currency} {amount:,.2f}")
+                if total_charge_mxn:
+                    st.write(f"**Cargos EVA MXN:** MXN {total_charge_mxn:,.2f}")
+                st.info(
+                    "Hay más de una moneda. SIVE muestra subtotales por moneda "
+                    "para no hacer una conversión implícita."
+                )
 
         b1, b2 = st.columns(2)
         if b1.button("Volver a captura", use_container_width=True):
@@ -1811,7 +2252,16 @@ def page_new_quote() -> None:
             ) or "Viajero"
 
         st.write(f"**Viajero principal:** {traveler_name}")
-        st.write(f"**Viajeros:** {max(int(draft.get('num_viajeros', 1) or 1), 1)}")
+        total_pax = max(int(draft.get("num_viajeros", 1) or 1), 1)
+        st.write(f"**Viajeros:** {total_pax}")
+        if total_pax > 1:
+            companions = list(draft.get("companions", []))
+            for idx in range(2, total_pax + 1):
+                companion = companions[idx - 2] if idx - 2 < len(companions) else {}
+                companion_name = companion.get("name", "").strip()
+                if companion.get("tba", False) or not companion_name:
+                    companion_name = "TBA · Nombre por definir"
+                st.write(f"**PAX {idx:02d}:** {companion_name}")
         st.write(
             "**Incluye:** "
             + ", ".join(draft.get("componentes", []))
