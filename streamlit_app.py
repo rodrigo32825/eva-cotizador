@@ -641,8 +641,6 @@ def _normalize_image_url(url: str) -> str:
     return url
 
 
-elected
-
 
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     if not REPORTLAB_AVAILABLE:
