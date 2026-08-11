@@ -150,6 +150,117 @@ def section_card(title: str, text: str) -> None:
 
 
 
+
+def _brand_slug(value: str) -> str:
+    value = (value or "").strip().lower()
+    replacements = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
+        "ü": "u", "ñ": "n",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_")
+
+
+def _first_existing_path(candidates: list[Path]) -> Path | None:
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _eva_logo_path() -> Path | None:
+    base_dir = Path(__file__).resolve().parent
+    return _first_existing_path(
+        [
+            base_dir / "assets" / "eva_logo.png",
+            base_dir / "assets" / "eva_logo.jpg",
+            base_dir / "eva_logo_crop.png",
+            base_dir / "eva_logo.png",
+            base_dir / "PROYECTO EVA_logo_02.jpeg",
+        ]
+    )
+
+
+def _airline_logo_local_path(airline_name: str) -> Path | None:
+    """Local fallback for airline branding.
+
+    Preferred future source is the airline catalog loaded once per session.
+    Local files make the PDF resilient when the catalog/logo URL is unavailable.
+    """
+    base_dir = Path(__file__).resolve().parent
+    slug = _brand_slug(airline_name)
+
+    aliases = {
+        "aeromexico": ["aeromexico", "am"],
+        "volaris": ["volaris", "y4"],
+        "avianca": ["avianca", "av"],
+        "latam": ["latam", "la"],
+        "air_canada": ["air_canada", "ac"],
+        "united": ["united", "ua"],
+        "american_airlines": ["american_airlines", "american", "aa"],
+        "delta": ["delta", "dl"],
+        "copa": ["copa", "cm"],
+        "iberia": ["iberia", "ib"],
+    }
+
+    tokens = [slug]
+    for canonical, alternatives in aliases.items():
+        if slug == canonical or slug in alternatives or any(a in slug for a in alternatives):
+            tokens = [canonical, *alternatives, slug]
+            break
+
+    candidates = []
+    for token in dict.fromkeys(tokens):
+        for ext in ("png", "jpg", "jpeg", "webp"):
+            candidates.append(base_dir / "assets" / "airlines" / f"{token}.{ext}")
+            candidates.append(base_dir / "airlines" / f"{token}.{ext}")
+
+    return _first_existing_path(candidates)
+
+
+def _airline_logo_source(draft: dict[str, Any], airline_name: str) -> dict[str, Any] | None:
+    """Resolve airline logo from the future cached catalog, then local assets.
+
+    Expected cached catalog shape can be either:
+      draft["airline_logo_catalog"]["Avianca"] = {"logo_url": "..."}
+    or:
+      draft["airline_logo_catalog"]["AV"] = {"name": "Avianca", "logo_url": "..."}
+    """
+    catalog = draft.get("airline_logo_catalog", {}) or {}
+    normalized = _brand_slug(airline_name)
+
+    for key, item in catalog.items():
+        if isinstance(item, str):
+            item = {"logo_url": item}
+        if not isinstance(item, dict):
+            continue
+
+        names = [
+            str(key),
+            str(item.get("name", "")),
+            str(item.get("nombre", "")),
+            str(item.get("iata", "")),
+            str(item.get("code", "")),
+        ]
+        if any(_brand_slug(name) == normalized for name in names if name):
+            if item.get("bytes"):
+                return {"bytes": item["bytes"]}
+            url = (
+                item.get("logo_url")
+                or item.get("LOGO_URL")
+                or item.get("url")
+            )
+            if url:
+                return {"url": url}
+
+    local = _airline_logo_local_path(airline_name)
+    if local:
+        return {"path": local}
+
+    return None
+
+
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError(
@@ -279,26 +390,74 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         except Exception:
             return None
 
-    def local_logo():
-        base_dir = Path(__file__).resolve().parent
-        candidates = [
-            base_dir / "eva_logo_crop.png",
-            base_dir / "PROYECTO EVA_logo_02.jpeg",
-            base_dir / "eva_logo.png",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                try:
-                    img = RLImage(str(candidate))
-                    max_w = 48 * mm
-                    max_h = 20 * mm
-                    ratio = min(max_w / img.imageWidth, max_h / img.imageHeight)
-                    img.drawWidth = img.imageWidth * ratio
-                    img.drawHeight = img.imageHeight * ratio
-                    return img
-                except Exception:
-                    continue
-        return None
+    def branded_image(
+        *,
+        path: Path | None = None,
+        source_bytes: bytes | None = None,
+        source_url: str | None = None,
+        max_w: float,
+        max_h: float,
+    ):
+        data = source_bytes
+
+        if path is not None:
+            try:
+                img = RLImage(str(path))
+                ratio = min(
+                    max_w / img.imageWidth,
+                    max_h / img.imageHeight,
+                )
+                img.drawWidth = img.imageWidth * ratio
+                img.drawHeight = img.imageHeight * ratio
+                return img
+            except Exception:
+                return None
+
+        if not data and source_url:
+            try:
+                response = requests.get(source_url, timeout=5)
+                response.raise_for_status()
+                data = response.content
+            except Exception:
+                data = None
+
+        if not data:
+            return None
+
+        try:
+            bio = BytesIO(data)
+            image_reader = ImageReader(bio)
+            width, height = image_reader.getSize()
+            scale = min(max_w / width, max_h / height)
+            bio.seek(0)
+            return RLImage(
+                bio,
+                width=width * scale,
+                height=height * scale,
+            )
+        except Exception:
+            return None
+
+    def eva_logo():
+        return branded_image(
+            path=_eva_logo_path(),
+            max_w=53 * mm,
+            max_h=20 * mm,
+        )
+
+    def airline_logo(airline_name: str):
+        source = _airline_logo_source(draft, airline_name)
+        if not source:
+            return None
+        return branded_image(
+            path=source.get("path"),
+            source_bytes=source.get("bytes"),
+            source_url=source.get("url"),
+            max_w=27 * mm,
+            max_h=10 * mm,
+        )
+
+
 
     if draft.get("modo_viajero") == "Buscar viajero existente":
         principal = draft.get("viajero_existente") or "Viajero"
@@ -328,23 +487,31 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
 
     story = []
 
-    logo = local_logo()
+    logo = eva_logo()
     left_header = logo if logo else P("PROYECTO EVA", "SIVEMonoBold")
 
     header = Table(
         [
-            [left_header, P("COTIZACIÓN DE VIAJE", "SIVETitle")],
-            [P("SIVE · Sistema Integral de Viajes EVA", "SIVESmall"), ""],
+            [
+                left_header,
+                Paragraph(
+                    "PROPUESTA DE VIAJE<br/>"
+                    '<font name="Courier" size="7" color="#737B80">'
+                    "SIVE · SISTEMA INTEGRAL DE VIAJES EVA"
+                    "</font>",
+                    styles["SIVETitle"],
+                ),
+            ],
         ],
-        colWidths=[74 * mm, 101 * mm],
+        colWidths=[78 * mm, 97 * mm],
     )
     header.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEBELOW", (0, 1), (-1, 1), 0.6, line),
-                ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
+                ("LINEBELOW", (0, 0), (-1, 0), 1.2, teal),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
             ]
         )
     )
@@ -419,10 +586,56 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 (f"Vuelo · opción {option_idx}", currency, air_total)
             )
 
+            # Pick the first airline in this option for the visual brand.
+            main_airline = ""
+            for direction_probe in ("outbound", "return", "multicity"):
+                for segment_probe in range(1, 10):
+                    candidate = captured_value(
+                        f"{prefix_root}_{direction_probe}_airline_{segment_probe}",
+                        "",
+                    )
+                    if candidate:
+                        main_airline = candidate
+                        break
+                if main_airline:
+                    break
+
+            air_logo = airline_logo(main_airline) if main_airline else None
+            brand_cell = (
+                air_logo
+                if air_logo
+                else P(main_airline.upper() if main_airline else "VUELO", "SIVEMonoBold")
+            )
+
+            option_header = Table(
+                [
+                    [
+                        brand_cell,
+                        Paragraph(
+                            f"OPCIÓN {option_idx}<br/>"
+                            f'<font name="Courier" size="7" color="#737B80">'
+                            f"{trip_type.upper()}"
+                            "</font>",
+                            styles["SIVESection"],
+                        ),
+                    ]
+                ],
+                colWidths=[70 * mm, 105 * mm],
+            )
+            option_header.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                        ("LINEBELOW", (0, 0), (-1, 0), 0.6, teal),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+                    ]
+                )
+            )
+
             option_flow = [
-                P(f"VUELOS · OPCIÓN {option_idx}", "SIVESection"),
-                P(f"Tipo de viaje: {trip_type}", "SIVESmall"),
-                Spacer(1, 1.5 * mm),
+                option_header,
+                Spacer(1, 1.8 * mm),
             ]
 
             price_table = Table(
@@ -597,11 +810,37 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             nights = (checkout - checkin).days if checkin and checkout else 0
             average = price / nights if price and nights > 0 else 0.0
 
+            hotel_heading = Table(
+                [
+                    [
+                        Paragraph(
+                            f"HOSPEDAJE · OPCIÓN {idx}",
+                            styles["SIVEMonoBold"],
+                        ),
+                        Paragraph(
+                            city.upper() if city else "",
+                            styles["SIVESmall"],
+                        ),
+                    ]
+                ],
+                colWidths=[100 * mm, 75 * mm],
+            )
+            hotel_heading.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                        ("LINEBELOW", (0, 0), (-1, 0), 0.6, teal),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+                    ]
+                )
+            )
+
             block = [
-                P(f"HOSPEDAJE · OPCIÓN {idx}", "SIVESection"),
+                hotel_heading,
+                Spacer(1, 1.4 * mm),
                 P(hotel_name or "Hotel", "SIVEHotel"),
-                P(city, "SIVESmall"),
-                Spacer(1, 1.5 * mm),
+                Spacer(1, 1.2 * mm),
             ]
 
             details = Table(
@@ -824,10 +1063,24 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 ]
             )
         )
+        service_heading = Table(
+            [[P(title, "SIVEMonoBold")]],
+            colWidths=[175 * mm],
+        )
+        service_heading.setStyle(
+            TableStyle(
+                [
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.6, teal),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+                ]
+            )
+        )
+
         story.append(
             KeepTogether(
                 [
-                    P(title, "SIVESection"),
+                    service_heading,
+                    Spacer(1, 1.5 * mm),
                     table,
                     Spacer(1, 5 * mm),
                 ]
@@ -835,7 +1088,19 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         )
 
     # -------------------- IMPORTES PROPUESTOS --------------------
-    story.append(P("IMPORTES PROPUESTOS", "SIVESection"))
+    proposal_heading = Table(
+        [[P("IMPORTES PROPUESTOS", "SIVEMonoBold")]],
+        colWidths=[175 * mm],
+    )
+    proposal_heading.setStyle(
+        TableStyle(
+            [
+                ("LINEBELOW", (0, 0), (-1, 0), 0.8, teal),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+            ]
+        )
+    )
+    story += [proposal_heading, Spacer(1, 1.5 * mm)]
 
     proposal_table_rows = [
         [P("OPCIÓN / SERVICIO", "SIVEMonoBold"), P("IMPORTE", "SIVEMonoBold")]
@@ -895,7 +1160,7 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         canvas.drawString(
             14 * mm,
             6.5 * mm,
-            "PROYECTO EVA · SIVE",
+            "PROYECTO EVA · travel@proyectoeva.mx · SIVE",
         )
         canvas.drawRightString(
             A4[0] - 14 * mm,
@@ -2294,8 +2559,27 @@ def page_new_quote() -> None:
                             else 0.0
                         )
 
+                    main_airline = ""
+                    for direction_probe in ("outbound", "return", "multicity"):
+                        for segment_probe in range(1, 10):
+                            candidate = captured(
+                                f"{root}_{direction_probe}_airline_{segment_probe}",
+                                "",
+                            )
+                            if candidate:
+                                main_airline = candidate
+                                break
+                        if main_airline:
+                            break
+
+                    airline_label = (
+                        f"{main_airline} · " if main_airline else ""
+                    )
+
                     st.markdown(
-                        f'<div class="sive-option-title">Opción de vuelo {option_idx}</div>',
+                        f'<div class="sive-option-title">'
+                        f'{airline_label}Opción de vuelo {option_idx}'
+                        f'</div>',
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -2689,6 +2973,46 @@ def page_new_quote() -> None:
         st.success("El borrador está listo para generar documento o guardar.")
 
         st.markdown("#### Vista previa de la propuesta")
+
+        eva_brand_ok = _eva_logo_path() is not None
+        if eva_brand_ok:
+            st.caption("✓ Logo de Proyecto EVA cargado")
+        else:
+            st.warning(
+                "No encuentro el logo de EVA. Sube `assets/eva_logo.png` "
+                "o `eva_logo_crop.png` a la raíz del repositorio."
+            )
+
+        if "Vuelos" in draft.get("componentes", []):
+            found_airline_logo = False
+            for option_idx in range(
+                1,
+                max(int(draft.get("flight_options", 1) or 1), 1) + 1,
+            ):
+                root = f"flight_{option_idx}"
+                for direction_probe in ("outbound", "return", "multicity"):
+                    for segment_probe in range(1, 10):
+                        airline = captured(
+                            f"{root}_{direction_probe}_airline_{segment_probe}",
+                            "",
+                        )
+                        if airline and _airline_logo_source(draft, airline):
+                            found_airline_logo = True
+                            break
+                    if found_airline_logo:
+                        break
+                if found_airline_logo:
+                    break
+
+            if found_airline_logo:
+                st.caption("✓ Branding de aerolínea disponible para el PDF")
+            else:
+                st.caption(
+                    "Los nombres de aerolínea aparecerán con estilo de boleto. "
+                    "Los logos se activarán al cargar el catálogo de aerolíneas "
+                    "o archivos en `assets/airlines/`."
+                )
+
         if draft["modo_viajero"] == "Buscar viajero existente":
             traveler_name = draft["viajero_existente"] or "Viajero"
         else:
