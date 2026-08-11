@@ -1036,16 +1036,32 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 segment_prefix = f"{prefix_root}_{direction}"
                 for idx in range(1, 10):
                     airline = captured_value(
-                        f"{segment_prefix}_airline_{idx}", ""
+                        f"{segment_prefix}_airline_{idx}_name",
+                        captured_value(
+                            f"{segment_prefix}_airline_{idx}",
+                            "",
+                        ),
+                    )
+                    airline_iata = captured_value(
+                        f"{segment_prefix}_airline_{idx}_iata",
+                        "",
                     )
                     number = captured_value(
                         f"{segment_prefix}_number_{idx}", ""
                     )
                     origin = captured_value(
-                        f"{segment_prefix}_origin_{idx}", ""
+                        f"{segment_prefix}_origin_{idx}_iata",
+                        captured_value(
+                            f"{segment_prefix}_origin_{idx}",
+                            "",
+                        ),
                     )
                     destination = captured_value(
-                        f"{segment_prefix}_destination_{idx}", ""
+                        f"{segment_prefix}_destination_{idx}_iata",
+                        captured_value(
+                            f"{segment_prefix}_destination_{idx}",
+                            "",
+                        ),
                     )
                     dep_date = captured_value(
                         f"{segment_prefix}_departure_date_{idx}", None
@@ -1083,9 +1099,14 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     segment_rows.append(
                         [
                             P(
-                                f"{airline_iata} {number}".strip()
-                                or airline
-                                or "Vuelo",
+                                (
+                                    f"{airline_iata} {number}".strip()
+                                    if airline_iata
+                                    else (
+                                        f"{airline} {number}".strip()
+                                        or "Vuelo"
+                                    )
+                                ),
                                 "SIVEMonoBold",
                             ),
                             P(f"{origin or '—'} → {destination or '—'}", "SIVEMonoBold"),
