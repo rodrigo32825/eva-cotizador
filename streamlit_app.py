@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import time
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any
 
 import requests
@@ -285,7 +286,7 @@ def initialize_catalogs() -> None:
             )
             iata = _clean_catalog_text(row.get("IATA")).upper()
             icao = _clean_catalog_text(row.get("ICAO")).upper()
-            logo_url = _clean_catalog_text(
+            logo_url = _normalize_image_url(
                 row.get("LOGO_URL")
                 or row.get("URL_LOGO")
             )
@@ -516,7 +517,7 @@ def airline_selector(
         st.session_state[f"{key_base}_name"] = selected["_name"]
         st.session_state[f"{key_base}_iata"] = selected["_iata"]
         st.session_state[f"{key_base}_icao"] = selected["_icao"]
-        st.session_state[f"{key_base}_logo_url"] = _clean_catalog_text(
+        st.session_state[f"{key_base}_logo_url"] = _normalize_image_url(
             selected.get("LOGO_URL")
             or selected.get("URL_LOGO")
         )
@@ -619,7 +620,28 @@ def airport_selector(
             unsafe_allow_html=True,
         )
 
-    return selected
+    return s
+def _normalize_image_url(url: str) -> str:
+    """Convert common Google Drive share links into direct image URLs."""
+    url = _clean_catalog_text(url)
+    if not url:
+        return ""
+
+    # https://drive.google.com/file/d/FILE_ID/view?...
+    match = re.search(r"drive\.google\.com/file/d/([^/]+)", url)
+    if match:
+        file_id = match.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+
+    # https://drive.google.com/open?id=FILE_ID
+    match = re.search(r"[?&]id=([^&]+)", url)
+    if "drive.google.com" in url and match:
+        return f"https://drive.google.com/uc?export=view&id={match.group(1)}"
+
+    return url
+
+
+elected
 
 
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
@@ -726,9 +748,21 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         data = source_bytes
         if not data and source_url:
             try:
-                response = requests.get(source_url, timeout=5)
+                response = requests.get(
+                    _normalize_image_url(source_url),
+                    timeout=8,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 SIVE/1.0",
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    },
+                )
                 response.raise_for_status()
-                data = response.content
+
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" in content_type:
+                    data = None
+                else:
+                    data = response.content
             except Exception:
                 data = None
 
@@ -776,9 +810,21 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
 
         if not data and source_url:
             try:
-                response = requests.get(source_url, timeout=5)
+                response = requests.get(
+                    _normalize_image_url(source_url),
+                    timeout=8,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 SIVE/1.0",
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    },
+                )
                 response.raise_for_status()
-                data = response.content
+
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" in content_type:
+                    data = None
+                else:
+                    data = response.content
             except Exception:
                 data = None
 
@@ -949,6 +995,8 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
 
             # Pick the first airline in this option for the visual brand.
             main_airline = ""
+            main_airline_logo_url = ""
+
             for direction_probe in ("outbound", "return", "multicity"):
                 for segment_probe in range(1, 10):
                     candidate = captured_value(
@@ -957,11 +1005,24 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     )
                     if candidate:
                         main_airline = candidate
+                        main_airline_logo_url = captured_value(
+                            f"{prefix_root}_{direction_probe}_airline_{segment_probe}_logo_url",
+                            "",
+                        )
                         break
                 if main_airline:
                     break
 
-            air_logo = airline_logo(main_airline) if main_airline else None
+            # Preferred: use the exact LOGO_URL stored with the selected airline.
+            # Fallback: resolve it again from the in-memory 10_CAT_AEROLINEAS catalog.
+            if main_airline_logo_url:
+                air_logo = branded_image(
+                    source_url=main_airline_logo_url,
+                    max_w=27 * mm,
+                    max_h=10 * mm,
+                )
+            else:
+                air_logo = airline_logo(main_airline) if main_airline else None
             brand_cell = (
                 air_logo
                 if air_logo
@@ -3443,33 +3504,64 @@ def page_new_quote() -> None:
             )
 
         if "Vuelos" in draft.get("componentes", []):
-            found_airline_logo = False
+            airline_brand_status = []
+
             for option_idx in range(
                 1,
                 max(int(draft.get("flight_options", 1) or 1), 1) + 1,
             ):
                 root = f"flight_{option_idx}"
+
                 for direction_probe in ("outbound", "return", "multicity"):
                     for segment_probe in range(1, 10):
-                        airline = captured(
-                            f"{root}_{direction_probe}_airline_{segment_probe}",
+                        airline_name = captured(
+                            f"{root}_{direction_probe}_airline_{segment_probe}_name",
                             "",
                         )
-                        if airline and _airline_logo_source(draft, airline):
-                            found_airline_logo = True
-                            break
-                    if found_airline_logo:
-                        break
-                if found_airline_logo:
-                    break
+                        if not airline_name:
+                            continue
 
-            if found_airline_logo:
-                st.caption("✓ Branding de aerolínea disponible para el PDF")
+                        airline_iata = captured(
+                            f"{root}_{direction_probe}_airline_{segment_probe}_iata",
+                            "",
+                        )
+                        logo_url = captured(
+                            f"{root}_{direction_probe}_airline_{segment_probe}_logo_url",
+                            "",
+                        )
+
+                        airline_brand_status.append(
+                            (
+                                airline_name,
+                                airline_iata,
+                                bool(logo_url),
+                            )
+                        )
+                        break
+
+                    if airline_brand_status:
+                        break
+
+            if airline_brand_status:
+                seen = set()
+                for airline_name, airline_iata, has_logo in airline_brand_status:
+                    ident = (airline_name, airline_iata)
+                    if ident in seen:
+                        continue
+                    seen.add(ident)
+
+                    if has_logo:
+                        st.caption(
+                            f"✓ {airline_name} ({airline_iata}) · LOGO_URL detectado"
+                        )
+                    else:
+                        st.warning(
+                            f"{airline_name} ({airline_iata}) no tiene LOGO_URL "
+                            "disponible desde 10_CAT_AEROLINEAS."
+                        )
             else:
                 st.caption(
-                    "La aerolínea está identificada desde 10_CAT_AEROLINEAS. "
-                    "Si su LOGO_URL está vacío, el PDF mostrará el nombre "
-                    "y código IATA sin logo."
+                    "Aún no hay una aerolínea seleccionada para verificar branding."
                 )
 
         if draft["modo_viajero"] == "Buscar viajero existente":
