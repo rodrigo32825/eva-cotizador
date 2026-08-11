@@ -469,6 +469,7 @@ def _find_catalog_index(
 def airline_selector(
     prefix: str,
     segment_number: int,
+    captured_value,
 ) -> dict[str, Any] | None:
     rows = airline_rows()
     key_base = f"{prefix}_airline_{segment_number}"
@@ -479,11 +480,11 @@ def airline_selector(
         )
         return None
 
-    saved_iata = captured(
+    saved_iata = captured_value(
         f"{key_base}_iata",
         "",
     )
-    saved_name = captured(
+    saved_name = captured_value(
         f"{key_base}_name",
         "",
     )
@@ -541,6 +542,7 @@ def airport_selector(
     segment_number: int,
     field_name: str,
     label: str,
+    captured_value,
 ) -> dict[str, Any] | None:
     rows = airport_rows()
     key_base = f"{prefix}_{field_name}_{segment_number}"
@@ -551,11 +553,11 @@ def airport_selector(
         )
         return None
 
-    saved_iata = captured(
+    saved_iata = captured_value(
         f"{key_base}_iata",
         "",
     )
-    saved_city = captured(
+    saved_city = captured_value(
         f"{key_base}_city",
         "",
     )
@@ -1884,6 +1886,7 @@ def page_new_quote() -> None:
                     selected_airline = airline_selector(
                         prefix,
                         segment_number,
+                        captured,
                     )
 
                 with flight_col:
@@ -1948,6 +1951,7 @@ def page_new_quote() -> None:
                         segment_number,
                         "origin",
                         "Origen *",
+                        captured,
                     )
 
                 with destination_col:
@@ -1956,6 +1960,7 @@ def page_new_quote() -> None:
                         segment_number,
                         "destination",
                         "Destino *",
+                        captured,
                     )
 
                 st.caption("Salida")
