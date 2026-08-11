@@ -185,12 +185,19 @@ def header() -> None:
 
         with left:
             if logo_path:
+                # Lower the logo slightly and reduce its visual size so the
+                # complete EVA mark sits comfortably inside the header.
+                st.markdown(
+                    '<div style="height:14px;"></div>',
+                    unsafe_allow_html=True,
+                )
                 st.image(
                     str(logo_path),
-                    width=190,
+                    width=165,
                 )
             else:
                 st.markdown(
+                    '<div style="height:14px;"></div>'
                     '<div class="sive-kicker">PROYECTO EVA</div>',
                     unsafe_allow_html=True,
                 )
