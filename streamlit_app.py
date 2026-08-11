@@ -179,11 +179,16 @@ def header() -> None:
     logo_path = _eva_logo_path()
 
     with st.container():
-        left, right = st.columns([1, 3.2], vertical_alignment="center")
+        # Give the horizontal EVA logo enough real width so Streamlit
+        # never clips its right edge inside the first column.
+        left, right = st.columns([1.35, 3.0], vertical_alignment="center")
 
         with left:
             if logo_path:
-                st.image(str(logo_path), width=145)
+                st.image(
+                    str(logo_path),
+                    width=190,
+                )
             else:
                 st.markdown(
                     '<div class="sive-kicker">PROYECTO EVA</div>',
