@@ -147,6 +147,7 @@ def init_state() -> None:
             "hotel_options": 1,
             "flight_options": 1,
             "flight_multicity_segments": {},
+            "airline_logo_bytes": {},
             "companions": [],
             "nombres": "",
             "apellido_paterno": "",
@@ -718,6 +719,76 @@ def _normalize_image_url(url: str) -> str:
     return url
 
 
+def _image_url_candidates(url: str) -> list[str]:
+    normalized = _normalize_image_url(url)
+    if not normalized:
+        return []
+
+    candidates = [normalized]
+    match = re.search(r"[?&]id=([^&]+)", normalized)
+
+    if "drive.google.com" in normalized and match:
+        file_id = match.group(1)
+        candidates.extend(
+            [
+                f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000",
+                f"https://drive.usercontent.google.com/download?id={file_id}&export=view",
+            ]
+        )
+
+    return list(dict.fromkeys(candidates))
+
+
+def _fetch_image_bytes(url: str) -> tuple[bytes | None, str]:
+    if not url:
+        return None, "LOGO_URL vacío"
+
+    last_error = "No se pudo descargar la imagen"
+
+    for candidate in _image_url_candidates(url):
+        try:
+            response = requests.get(
+                candidate,
+                timeout=8,
+                allow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 SIVE/1.0",
+                    "Accept": "image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*;q=0.8",
+                },
+            )
+            response.raise_for_status()
+
+            content_type = (
+                response.headers.get("content-type", "")
+                .split(";")[0]
+                .strip()
+                .lower()
+            )
+            data = response.content
+
+            if not data:
+                last_error = "La URL respondió sin contenido"
+                continue
+
+            if content_type in {"text/html", "text/plain"}:
+                last_error = "La URL abre una página, no una imagen pública"
+                continue
+
+            try:
+                ImageReader(BytesIO(data)).getSize()
+            except Exception:
+                last_error = "El archivo no es una imagen compatible con el PDF"
+                continue
+
+            return data, "OK"
+
+        except Exception as exc:
+            last_error = str(exc)
+
+    return None, last_error
+
+
+
 
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     if not REPORTLAB_AVAILABLE:
@@ -822,24 +893,7 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     def safe_image(source_bytes: bytes | None, source_url: str | None):
         data = source_bytes
         if not data and source_url:
-            try:
-                response = requests.get(
-                    _normalize_image_url(source_url),
-                    timeout=8,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 SIVE/1.0",
-                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    },
-                )
-                response.raise_for_status()
-
-                content_type = response.headers.get("content-type", "").lower()
-                if "text/html" in content_type:
-                    data = None
-                else:
-                    data = response.content
-            except Exception:
-                data = None
+            data, _ = _fetch_image_bytes(source_url)
 
         if not data:
             return None
@@ -1088,9 +1142,33 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 if main_airline:
                     break
 
-            # Preferred: use the exact LOGO_URL stored with the selected airline.
-            # Fallback: resolve it again from the in-memory 10_CAT_AEROLINEAS catalog.
-            if main_airline_logo_url:
+            main_airline_iata = ""
+            for direction_probe in ("outbound", "return", "multicity"):
+                for segment_probe in range(1, 10):
+                    candidate_name = captured_value(
+                        f"{prefix_root}_{direction_probe}_airline_{segment_probe}_name",
+                        "",
+                    )
+                    if candidate_name:
+                        main_airline_iata = captured_value(
+                            f"{prefix_root}_{direction_probe}_airline_{segment_probe}_iata",
+                            "",
+                        )
+                        break
+                if main_airline_iata:
+                    break
+
+            cached_logo_bytes = (
+                draft.get("airline_logo_bytes", {}) or {}
+            ).get(main_airline_iata)
+
+            if cached_logo_bytes:
+                air_logo = branded_image(
+                    source_bytes=cached_logo_bytes,
+                    max_w=27 * mm,
+                    max_h=10 * mm,
+                )
+            elif main_airline_logo_url:
                 air_logo = branded_image(
                     source_url=main_airline_logo_url,
                     max_w=27 * mm,
@@ -3609,7 +3687,9 @@ def page_new_quote() -> None:
             )
 
         if "Vuelos" in draft.get("componentes", []):
-            airline_brand_status = []
+            st.markdown("##### Branding de aerolíneas")
+            draft.setdefault("airline_logo_bytes", {})
+            checked_airlines = set()
 
             for option_idx in range(
                 1,
@@ -3623,9 +3703,6 @@ def page_new_quote() -> None:
                             f"{root}_{direction_probe}_airline_{segment_probe}_name",
                             "",
                         )
-                        if not airline_name:
-                            continue
-
                         airline_iata = captured(
                             f"{root}_{direction_probe}_airline_{segment_probe}_iata",
                             "",
@@ -3635,38 +3712,43 @@ def page_new_quote() -> None:
                             "",
                         )
 
-                        airline_brand_status.append(
-                            (
-                                airline_name,
-                                airline_iata,
-                                bool(logo_url),
+                        if not airline_name:
+                            continue
+
+                        identity = airline_iata or airline_name
+                        if identity in checked_airlines:
+                            continue
+                        checked_airlines.add(identity)
+
+                        if not logo_url:
+                            st.warning(
+                                f"{airline_name} ({airline_iata or 'sin IATA'}) · "
+                                "10_CAT_AEROLINEAS no tiene LOGO_URL."
                             )
-                        )
-                        break
+                            continue
 
-                    if airline_brand_status:
-                        break
+                        logo_bytes, logo_status = _fetch_image_bytes(logo_url)
 
-            if airline_brand_status:
-                seen = set()
-                for airline_name, airline_iata, has_logo in airline_brand_status:
-                    ident = (airline_name, airline_iata)
-                    if ident in seen:
-                        continue
-                    seen.add(ident)
+                        if logo_bytes:
+                            if airline_iata:
+                                draft["airline_logo_bytes"][airline_iata] = logo_bytes
 
-                    if has_logo:
-                        st.caption(
-                            f"✓ {airline_name} ({airline_iata}) · LOGO_URL detectado"
-                        )
-                    else:
-                        st.warning(
-                            f"{airline_name} ({airline_iata}) no tiene LOGO_URL "
-                            "disponible desde 10_CAT_AEROLINEAS."
-                        )
-            else:
+                            st.success(
+                                f"✓ {airline_name} ({airline_iata}) · logo verificado"
+                            )
+
+                            preview_col, _ = st.columns([1, 4])
+                            with preview_col:
+                                st.image(logo_bytes, width=105)
+                        else:
+                            st.error(
+                                f"{airline_name} ({airline_iata}) · "
+                                f"LOGO_URL detectado, pero no se puede usar: {logo_status}"
+                            )
+
+            if not checked_airlines:
                 st.caption(
-                    "Aún no hay una aerolínea seleccionada para verificar branding."
+                    "Aún no hay una aerolínea seleccionada para validar el logo."
                 )
 
         if draft["modo_viajero"] == "Buscar viajero existente":
