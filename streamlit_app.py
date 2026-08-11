@@ -274,14 +274,13 @@ def _airline_logo_source(
     draft: dict[str, Any],
     airline_name: str,
 ) -> dict[str, Any] | None:
-    """Resolve airline logo exclusively from 10_CAT_AEROLINEAS."""
+    """Resolve airline logo, preferring repo-local Logos/<ICAO>.png."""
     catalog = draft.get("airline_logo_catalog", {}) or {}
     normalized = _brand_slug(airline_name)
 
     for key, item in catalog.items():
         if isinstance(item, str):
             item = {"logo_url": item}
-
         if not isinstance(item, dict):
             continue
 
@@ -296,25 +295,40 @@ def _airline_logo_source(
             str(item.get("ICAO", "")),
         ]
 
-        if any(
+        if not any(
             _brand_slug(name) == normalized
             for name in names
             if name
         ):
-            if item.get("bytes"):
-                return {"bytes": item["bytes"]}
+            continue
 
-            url = (
-                item.get("logo_url")
-                or item.get("LOGO_URL")
-                or item.get("url")
-                or item.get("URL_LOGO")
-            )
-            if url:
-                return {"url": url}
+        if item.get("bytes"):
+            return {"bytes": item["bytes"]}
+
+        iata = _clean_catalog_text(
+            item.get("iata") or item.get("IATA")
+        ).upper()
+        icao = _clean_catalog_text(
+            item.get("icao") or item.get("ICAO")
+        ).upper()
+
+        local_bytes, _ = _local_airline_logo_bytes(
+            iata=iata,
+            icao=icao,
+        )
+        if local_bytes:
+            return {"bytes": local_bytes}
+
+        url = (
+            item.get("logo_url")
+            or item.get("LOGO_URL")
+            or item.get("url")
+            or item.get("URL_LOGO")
+        )
+        if url:
+            return {"url": url}
 
     return None
-
 
 
 
@@ -324,6 +338,14 @@ def _clean_catalog_text(value: Any) -> str:
 
 def initialize_catalogs() -> None:
     """Load quote catalogs once per session, only when capture needs them."""
+    catalog_runtime_version = "1.26"
+    if st.session_state.get("_catalog_runtime_version") != catalog_runtime_version:
+        st.session_state["_catalog_runtime_version"] = catalog_runtime_version
+        st.session_state["catalogs_loaded"] = False
+        st.session_state["_catalog_load_attempted"] = False
+        st.session_state["airlines_catalog"] = []
+        st.session_state["airports_catalog"] = []
+
     if st.session_state.get("catalogs_loaded"):
         return
 
@@ -362,7 +384,7 @@ def initialize_catalogs() -> None:
             )
             iata = _clean_catalog_text(row.get("IATA")).upper()
             icao = _clean_catalog_text(row.get("ICAO")).upper()
-            logo_url = _normalize_image_url(
+            logo_url = _clean_catalog_text(
                 row.get("LOGO_URL")
                 or row.get("URL_LOGO")
             )
@@ -593,7 +615,7 @@ def airline_selector(
         st.session_state[f"{key_base}_name"] = selected["_name"]
         st.session_state[f"{key_base}_iata"] = selected["_iata"]
         st.session_state[f"{key_base}_icao"] = selected["_icao"]
-        st.session_state[f"{key_base}_logo_url"] = _normalize_image_url(
+        st.session_state[f"{key_base}_logo_url"] = _clean_catalog_text(
             selected.get("LOGO_URL")
             or selected.get("URL_LOGO")
         )
@@ -763,6 +785,42 @@ def _repo_local_image_path(value: str) -> Path | None:
         return None
 
     return candidate if candidate.is_file() else None
+
+
+def _local_airline_logo_bytes(
+    iata: str = "",
+    icao: str = "",
+) -> tuple[bytes | None, str]:
+    """Find an airline logo directly in the repo's Logos folder."""
+    repo_root = Path(__file__).resolve().parent
+    logos_dir = repo_root / "Logos"
+
+    if not logos_dir.is_dir():
+        return None, "No existe la carpeta Logos en el repositorio"
+
+    codes = []
+    for code in (icao, iata):
+        code = _clean_catalog_text(code).upper()
+        if code and code not in codes:
+            codes.append(code)
+
+    extensions = (".png", ".jpg", ".jpeg", ".webp")
+
+    for code in codes:
+        for ext in extensions:
+            for filename in (f"{code}{ext}", f"{code.lower()}{ext}"):
+                candidate = logos_dir / filename
+                if not candidate.is_file():
+                    continue
+                try:
+                    data = candidate.read_bytes()
+                    ImageReader(BytesIO(data)).getSize()
+                    return data, f"OK · logo local Logos/{candidate.name}"
+                except Exception as exc:
+                    return None, f"Logo local inválido {candidate.name}: {exc}"
+
+    searched = ", ".join(codes) if codes else "sin IATA/ICAO"
+    return None, f"No encontré logo local para {searched}"
 
 
 def _image_url_candidates(url: str) -> list[str]:
@@ -1220,11 +1278,38 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 if main_airline_iata:
                     break
 
+            main_airline_icao = ""
+            for direction_probe in ("outbound", "return", "multicity"):
+                for segment_probe in range(1, 10):
+                    candidate_name = captured_value(
+                        f"{prefix_root}_{direction_probe}_airline_{segment_probe}_name",
+                        "",
+                    )
+                    if candidate_name:
+                        main_airline_icao = captured_value(
+                            f"{prefix_root}_{direction_probe}_airline_{segment_probe}_icao",
+                            "",
+                        )
+                        break
+                if main_airline_icao:
+                    break
+
+            local_logo_bytes, _ = _local_airline_logo_bytes(
+                iata=main_airline_iata,
+                icao=main_airline_icao,
+            )
+
             cached_logo_bytes = (
                 draft.get("airline_logo_bytes", {}) or {}
             ).get(main_airline_iata)
 
-            if cached_logo_bytes:
+            if local_logo_bytes:
+                air_logo = branded_image(
+                    source_bytes=local_logo_bytes,
+                    max_w=27 * mm,
+                    max_h=10 * mm,
+                )
+            elif cached_logo_bytes:
                 air_logo = branded_image(
                     source_bytes=cached_logo_bytes,
                     max_w=27 * mm,
@@ -1236,6 +1321,8 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     max_w=27 * mm,
                     max_h=10 * mm,
                 )
+                if air_logo is None and main_airline:
+                    air_logo = airline_logo(main_airline)
             else:
                 air_logo = airline_logo(main_airline) if main_airline else None
             brand_cell = (
@@ -3769,6 +3856,10 @@ def page_new_quote() -> None:
                             f"{root}_{direction_probe}_airline_{segment_probe}_iata",
                             "",
                         )
+                        airline_icao = captured(
+                            f"{root}_{direction_probe}_airline_{segment_probe}_icao",
+                            "",
+                        )
                         logo_url = captured(
                             f"{root}_{direction_probe}_airline_{segment_probe}_logo_url",
                             "",
@@ -3777,19 +3868,25 @@ def page_new_quote() -> None:
                         if not airline_name:
                             continue
 
-                        identity = airline_iata or airline_name
+                        identity = airline_iata or airline_icao or airline_name
                         if identity in checked_airlines:
                             continue
                         checked_airlines.add(identity)
 
-                        if not logo_url:
+                        logo_bytes, logo_status = _local_airline_logo_bytes(
+                            iata=airline_iata,
+                            icao=airline_icao,
+                        )
+
+                        if not logo_bytes and logo_url:
+                            logo_bytes, logo_status = _fetch_image_bytes(logo_url)
+
+                        if not logo_bytes and not logo_url:
                             st.warning(
                                 f"{airline_name} ({airline_iata or 'sin IATA'}) · "
-                                "10_CAT_AEROLINEAS no tiene LOGO_URL."
+                                f"{logo_status}. Tampoco hay LOGO_URL."
                             )
                             continue
-
-                        logo_bytes, logo_status = _fetch_image_bytes(logo_url)
 
                         if logo_bytes:
                             if airline_iata:
