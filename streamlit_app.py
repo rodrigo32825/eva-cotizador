@@ -719,6 +719,52 @@ def _normalize_image_url(url: str) -> str:
     return url
 
 
+def _repo_local_image_path(value: str) -> Path | None:
+    """Resolve an airline logo reference to a local file in the repo.
+
+    Accepted examples:
+      Logos/AMX.png
+      ./Logos/AMX.png
+      https://github.com/owner/repo/blob/main/Logos/AMX.png
+      https://raw.githubusercontent.com/owner/repo/main/Logos/AMX.png
+    """
+    value = _clean_catalog_text(value)
+    if not value:
+        return None
+
+    repo_root = Path(__file__).resolve().parent
+    relative = value
+
+    github_blob = re.search(
+        r"github\.com/[^/]+/[^/]+/blob/[^/]+/(.+)$",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if github_blob:
+        relative = github_blob.group(1)
+
+    github_raw = re.search(
+        r"raw\.githubusercontent\.com/[^/]+/[^/]+/[^/]+/(.+)$",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if github_raw:
+        relative = github_raw.group(1)
+
+    if re.match(r"^https?://", relative, flags=re.IGNORECASE):
+        return None
+
+    relative = relative.lstrip("/").replace("\\", "/")
+    candidate = (repo_root / relative).resolve()
+
+    try:
+        candidate.relative_to(repo_root)
+    except ValueError:
+        return None
+
+    return candidate if candidate.is_file() else None
+
+
 def _image_url_candidates(url: str) -> list[str]:
     normalized = _normalize_image_url(url)
     if not normalized:
@@ -740,8 +786,28 @@ def _image_url_candidates(url: str) -> list[str]:
 
 
 def _fetch_image_bytes(url: str) -> tuple[bytes | None, str]:
+    """Load and validate a logo.
+
+    Local repository files are preferred. If no local file exists,
+    SIVE falls back to a public HTTP(S) image URL.
+    """
     if not url:
         return None, "LOGO_URL vacío"
+
+    local_path = _repo_local_image_path(url)
+
+    if local_path:
+        try:
+            data = local_path.read_bytes()
+            ImageReader(BytesIO(data)).getSize()
+            return data, f"OK · archivo local {local_path.as_posix()}"
+        except Exception as exc:
+            return None, f"Archivo local inválido: {exc}"
+
+    clean_url = _clean_catalog_text(url)
+
+    if not re.match(r"^https?://", clean_url, flags=re.IGNORECASE):
+        return None, "No se encontró el archivo dentro del repositorio"
 
     last_error = "No se pudo descargar la imagen"
 
@@ -780,16 +846,12 @@ def _fetch_image_bytes(url: str) -> tuple[bytes | None, str]:
                 last_error = "El archivo no es una imagen compatible con el PDF"
                 continue
 
-            return data, "OK"
+            return data, "OK · URL pública"
 
         except Exception as exc:
             last_error = str(exc)
 
     return None, last_error
-
-
-
-
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError(
@@ -3734,7 +3796,7 @@ def page_new_quote() -> None:
                                 draft["airline_logo_bytes"][airline_iata] = logo_bytes
 
                             st.success(
-                                f"✓ {airline_name} ({airline_iata}) · logo verificado"
+                                f"✓ {airline_name} ({airline_iata}) · {logo_status}"
                             )
 
                             preview_col, _ = st.columns([1, 4])
