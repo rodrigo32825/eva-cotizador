@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import time
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -16,6 +17,7 @@ try:
     from reportlab.lib.utils import ImageReader
     from reportlab.platypus import (
         Image as RLImage,
+        KeepTogether,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
@@ -53,6 +55,8 @@ st.markdown(
       .sive-card-title {font-size: 1.05rem; font-weight: 700; color: var(--eva-text);}
       .sive-card-text {color: var(--eva-muted); margin-top: .25rem;}
       .sive-mono {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: .01em;}
+      .sive-option-title {font-size: 1.18rem; font-weight: 750; line-height: 1.25; color: var(--eva-text); margin: .15rem 0 .15rem 0;}
+      .sive-option-meta {font-size: .86rem; color: var(--eva-muted); margin-bottom: .45rem;}
       div[data-testid="stButton"] > button {
         min-height: 74px;
         border-radius: 18px;
@@ -86,6 +90,8 @@ def init_state() -> None:
             "hotel_image_cache": None,
             "hotel_image_caches": {},
             "hotel_options": 1,
+            "flight_options": 1,
+            "flight_multicity_segments": {},
             "companions": [],
             "nombres": "",
             "apellido_paterno": "",
@@ -164,8 +170,8 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         ParagraphStyle(
             name="SIVETitle",
             fontName="Helvetica",
-            fontSize=18,
-            leading=20,
+            fontSize=17,
+            leading=19,
             textColor=dark,
         )
     )
@@ -177,6 +183,15 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             leading=13,
             textColor=dark,
             spaceAfter=4,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SIVEHotel",
+            fontName="Helvetica-Bold",
+            fontSize=11.5,
+            leading=14,
+            textColor=dark,
         )
     )
     styles.add(
@@ -227,7 +242,10 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     )
 
     def P(value, style="SIVEBody"):
-        return Paragraph(str(value if value not in (None, "") else "—"), styles[style])
+        return Paragraph(
+            str(value if value not in (None, "") else "—"),
+            styles[style],
+        )
 
     def money(amount: float, currency: str) -> str:
         return f"{currency} {float(amount or 0):,.2f}"
@@ -241,6 +259,7 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 data = response.content
             except Exception:
                 data = None
+
         if not data:
             return None
 
@@ -248,13 +267,38 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             bio = BytesIO(data)
             image_reader = ImageReader(bio)
             width, height = image_reader.getSize()
-            max_w = 67 * mm
-            max_h = 43 * mm
+            max_w = 62 * mm
+            max_h = 40 * mm
             scale = min(max_w / width, max_h / height)
             bio.seek(0)
-            return RLImage(bio, width=width * scale, height=height * scale)
+            return RLImage(
+                bio,
+                width=width * scale,
+                height=height * scale,
+            )
         except Exception:
             return None
+
+    def local_logo():
+        base_dir = Path(__file__).resolve().parent
+        candidates = [
+            base_dir / "eva_logo_crop.png",
+            base_dir / "PROYECTO EVA_logo_02.jpeg",
+            base_dir / "eva_logo.png",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                try:
+                    img = RLImage(str(candidate))
+                    max_w = 48 * mm
+                    max_h = 20 * mm
+                    ratio = min(max_w / img.imageWidth, max_h / img.imageHeight)
+                    img.drawWidth = img.imageWidth * ratio
+                    img.drawHeight = img.imageHeight * ratio
+                    return img
+                except Exception:
+                    continue
+        return None
 
     if draft.get("modo_viajero") == "Buscar viajero existente":
         principal = draft.get("viajero_existente") or "Viajero"
@@ -281,11 +325,15 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         bottomMargin=15 * mm,
         title="Cotización Proyecto EVA",
     )
+
     story = []
+
+    logo = local_logo()
+    left_header = logo if logo else P("PROYECTO EVA", "SIVEMonoBold")
 
     header = Table(
         [
-            [P("PROYECTO EVA", "SIVEMonoBold"), P("COTIZACIÓN DE VIAJE", "SIVETitle")],
+            [left_header, P("COTIZACIÓN DE VIAJE", "SIVETitle")],
             [P("SIVE · Sistema Integral de Viajes EVA", "SIVESmall"), ""],
         ],
         colWidths=[74 * mm, 101 * mm],
@@ -293,7 +341,7 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     header.setStyle(
         TableStyle(
             [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("LINEBELOW", (0, 1), (-1, 1), 0.6, line),
                 ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
@@ -303,13 +351,13 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     story += [header, Spacer(1, 4 * mm)]
 
     pax_rows = [[P("PAX", "SIVEMonoBold"), P("VIAJERO", "SIVEMonoBold")]]
-    pax_rows.append([P("01", "SIVEMono"), P(principal, "SIVEBody")])
+    pax_rows.append([P("01", "SIVEMono"), P(principal)])
     for idx in range(2, traveler_count + 1):
         companion = companions[idx - 2] if idx - 2 < len(companions) else {}
         name = companion.get("name", "").strip()
         is_tba = companion.get("tba", False)
         display = "TBA · Nombre por definir" if is_tba or not name else name
-        pax_rows.append([P(f"{idx:02d}", "SIVEMono"), P(display, "SIVEBody")])
+        pax_rows.append([P(f"{idx:02d}", "SIVEMono"), P(display)])
 
     pax_table = Table(pax_rows, colWidths=[18 * mm, 157 * mm])
     pax_table.setStyle(
@@ -329,129 +377,197 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
     story += [pax_table, Spacer(1, 5 * mm)]
 
     components = draft.get("componentes", [])
-    subtotals_by_currency: dict[str, float] = {}
-    total_eva_fees_mxn = 0.0
+    proposal_rows = []
 
-    def add_subtotal(currency: str, amount: float) -> None:
-        if amount:
-            subtotals_by_currency[currency] = subtotals_by_currency.get(currency, 0.0) + float(amount)
-
-    # -------------------- VUELOS --------------------
+    # -------------------- VUELOS / ALTERNATIVAS --------------------
     if "Vuelos" in components:
-        story.append(P("VUELOS", "SIVESection"))
+        flight_options = max(int(draft.get("flight_options", 1) or 1), 1)
 
-        trip_type = captured_value("flight_trip_type", "Viaje sencillo")
-        flight_pax = max(int(captured_value("flight_pax", traveler_count) or traveler_count), 1)
-        price_basis = captured_value("flight_price_basis", "Total de la reserva")
-        entered_price = float(captured_value("flight_total_price", 0.0) or 0.0)
-        currency = captured_value("flight_total_currency", "MXN")
-
-        if price_basis == "Precio por pasajero":
-            unit_price = entered_price
-            air_total = entered_price * flight_pax
-        else:
-            air_total = entered_price
-            unit_price = air_total / flight_pax if flight_pax else 0.0
-
-        add_subtotal(currency, air_total)
-
-        summary = Table(
-            [
-                [
-                    P("PAX", "SIVESmall"),
-                    P("TARIFA / PAX", "SIVESmall"),
-                    P("SUBTOTAL VUELOS", "SIVESmall"),
-                ],
-                [
-                    P(str(flight_pax), "SIVEMonoBold"),
-                    P(money(unit_price, currency), "SIVEMonoBold"),
-                    P(money(air_total, currency), "SIVEPrice"),
-                ],
-            ],
-            colWidths=[35 * mm, 65 * mm, 75 * mm],
-        )
-        summary.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, -1), soft),
-                    ("BOX", (0, 0), (-1, -1), 0.5, line),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("ALIGN", (2, 0), (2, -1), "RIGHT"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ]
+        for option_idx in range(1, flight_options + 1):
+            prefix_root = f"flight_{option_idx}"
+            trip_type = captured_value(
+                f"{prefix_root}_trip_type",
+                "Viaje sencillo",
             )
-        )
-        story += [P(f"Tipo de viaje: {trip_type}", "SIVESmall"), Spacer(1, 1.5 * mm), summary, Spacer(1, 2 * mm)]
+            flight_pax = max(
+                int(captured_value(f"{prefix_root}_pax", traveler_count) or traveler_count),
+                1,
+            )
+            price_basis = captured_value(
+                f"{prefix_root}_price_basis",
+                "Total de la reserva",
+            )
+            entered_price = float(
+                captured_value(f"{prefix_root}_total_price", 0.0) or 0.0
+            )
+            currency = captured_value(
+                f"{prefix_root}_total_currency",
+                "MXN",
+            )
 
-        segment_rows = []
-        for prefix in ("outbound", "return", "multicity"):
-            for idx in range(1, 10):
-                airline = captured_value(f"{prefix}_airline_{idx}", "")
-                number = captured_value(f"{prefix}_number_{idx}", "")
-                origin = captured_value(f"{prefix}_origin_{idx}", "")
-                destination = captured_value(f"{prefix}_destination_{idx}", "")
-                dep_date = captured_value(f"{prefix}_departure_date_{idx}", None)
-                dep_time = captured_value(f"{prefix}_departure_time_{idx}", None)
-                arr_date = captured_value(f"{prefix}_arrival_date_{idx}", None)
-                arr_time = captured_value(f"{prefix}_arrival_time_{idx}", None)
-                fare = captured_value(f"{prefix}_fare_{idx}", "")
-                baggage = captured_value(f"{prefix}_baggage_{idx}", "")
+            if price_basis == "Precio por pasajero":
+                unit_price = entered_price
+                air_total = entered_price * flight_pax
+            else:
+                air_total = entered_price
+                unit_price = air_total / flight_pax if flight_pax else 0.0
 
-                if not any([airline, number, origin, destination, dep_date, arr_date]):
-                    continue
+            if not air_total:
+                continue
 
-                dep_text = (
-                    f"{dep_date or ''} "
-                    f"{dep_time.strftime('%H:%M') if hasattr(dep_time, 'strftime') else dep_time or ''}"
-                ).strip()
-                arr_text = (
-                    f"{arr_date or ''} "
-                    f"{arr_time.strftime('%H:%M') if hasattr(arr_time, 'strftime') else arr_time or ''}"
-                ).strip()
+            proposal_rows.append(
+                (f"Vuelo · opción {option_idx}", currency, air_total)
+            )
 
-                segment_rows.append(
+            option_flow = [
+                P(f"VUELOS · OPCIÓN {option_idx}", "SIVESection"),
+                P(f"Tipo de viaje: {trip_type}", "SIVESmall"),
+                Spacer(1, 1.5 * mm),
+            ]
+
+            price_table = Table(
+                [
                     [
-                        P(f"{airline} {number}".strip() or "Vuelo", "SIVEMono"),
-                        P(f"{origin or '—'} → {destination or '—'}", "SIVEMonoBold"),
-                        P(f"SAL {dep_text}<br/>LLE {arr_text}", "SIVESmall"),
-                        P(f"{fare or ''}<br/>{baggage or ''}".strip(), "SIVESmall"),
-                    ]
-                )
-
-        if segment_rows:
-            seg = Table(
-                [[P("VUELO", "SIVESmall"), P("RUTA", "SIVESmall"), P("HORARIO", "SIVESmall"), P("TARIFA / EQUIPAJE", "SIVESmall")]]
-                + segment_rows,
-                colWidths=[36 * mm, 43 * mm, 54 * mm, 42 * mm],
+                        P("PAX", "SIVESmall"),
+                        P("TARIFA / PAX", "SIVESmall"),
+                        P("TOTAL OPCIÓN", "SIVESmall"),
+                    ],
+                    [
+                        P(str(flight_pax), "SIVEMonoBold"),
+                        P(money(unit_price, currency), "SIVEMonoBold"),
+                        P(money(air_total, currency), "SIVEPrice"),
+                    ],
+                ],
+                colWidths=[35 * mm, 65 * mm, 75 * mm],
             )
-            seg.setStyle(
+            price_table.setStyle(
                 TableStyle(
                     [
-                        ("BACKGROUND", (0, 0), (-1, 0), soft),
-                        ("BOX", (0, 0), (-1, -1), 0.45, line),
+                        ("BACKGROUND", (0, 0), (-1, -1), soft),
+                        ("BOX", (0, 0), (-1, -1), 0.5, line),
                         ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                        ("TOPPADDING", (0, 0), (-1, -1), 4),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                     ]
                 )
             )
-            story += [seg, Spacer(1, 2 * mm)]
+            option_flow += [price_table, Spacer(1, 2 * mm)]
 
-        fee = float(captured_value("review_charge_total_flights", 0.0) or 0.0)
-        if fee:
-            total_eva_fees_mxn += fee
-            story.append(P(f"Cargo por servicio EVA: MXN {fee:,.2f}", "SIVESmall"))
+            segment_rows = []
+            for direction in ("outbound", "return", "multicity"):
+                segment_prefix = f"{prefix_root}_{direction}"
+                for idx in range(1, 10):
+                    airline = captured_value(
+                        f"{segment_prefix}_airline_{idx}", ""
+                    )
+                    number = captured_value(
+                        f"{segment_prefix}_number_{idx}", ""
+                    )
+                    origin = captured_value(
+                        f"{segment_prefix}_origin_{idx}", ""
+                    )
+                    destination = captured_value(
+                        f"{segment_prefix}_destination_{idx}", ""
+                    )
+                    dep_date = captured_value(
+                        f"{segment_prefix}_departure_date_{idx}", None
+                    )
+                    dep_time = captured_value(
+                        f"{segment_prefix}_departure_time_{idx}", None
+                    )
+                    arr_date = captured_value(
+                        f"{segment_prefix}_arrival_date_{idx}", None
+                    )
+                    arr_time = captured_value(
+                        f"{segment_prefix}_arrival_time_{idx}", None
+                    )
+                    fare = captured_value(
+                        f"{segment_prefix}_fare_{idx}", ""
+                    )
+                    baggage = captured_value(
+                        f"{segment_prefix}_baggage_{idx}", ""
+                    )
 
-        story.append(Spacer(1, 5 * mm))
+                    if not any(
+                        [airline, number, origin, destination, dep_date, arr_date]
+                    ):
+                        continue
 
-    # -------------------- HOSPEDAJES --------------------
+                    dep_text = (
+                        f"{dep_date or ''} "
+                        f"{dep_time.strftime('%H:%M') if hasattr(dep_time, 'strftime') else dep_time or ''}"
+                    ).strip()
+                    arr_text = (
+                        f"{arr_date or ''} "
+                        f"{arr_time.strftime('%H:%M') if hasattr(arr_time, 'strftime') else arr_time or ''}"
+                    ).strip()
+
+                    segment_rows.append(
+                        [
+                            P(f"{airline} {number}".strip() or "Vuelo", "SIVEMono"),
+                            P(f"{origin or '—'} → {destination or '—'}", "SIVEMonoBold"),
+                            P(
+                                f"SAL {dep_text}<br/>LLE {arr_text}",
+                                "SIVESmall",
+                            ),
+                            P(
+                                f"{fare or ''}<br/>{baggage or ''}".strip(),
+                                "SIVESmall",
+                            ),
+                        ]
+                    )
+
+            if segment_rows:
+                seg_table = Table(
+                    [
+                        [
+                            P("VUELO", "SIVESmall"),
+                            P("RUTA", "SIVESmall"),
+                            P("HORARIO", "SIVESmall"),
+                            P("TARIFA / EQUIPAJE", "SIVESmall"),
+                        ]
+                    ]
+                    + segment_rows,
+                    colWidths=[36 * mm, 43 * mm, 54 * mm, 42 * mm],
+                )
+                seg_table.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), soft),
+                            ("BOX", (0, 0), (-1, -1), 0.45, line),
+                            ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    )
+                )
+                option_flow += [seg_table, Spacer(1, 2 * mm)]
+
+            # One EVA flight fee is shown as a commercial condition,
+            # but is not included in a grand total while alternatives remain open.
+            fee = float(
+                captured_value("review_charge_total_flights", 0.0) or 0.0
+            )
+            if fee:
+                option_flow.append(
+                    P(
+                        f"Cargo por servicio EVA aplicable al vuelo seleccionado: "
+                        f"MXN {fee:,.2f}",
+                        "SIVESmall",
+                    )
+                )
+
+            option_flow.append(Spacer(1, 5 * mm))
+            story.append(KeepTogether(option_flow))
+
+    # -------------------- HOSPEDAJES / ALTERNATIVAS --------------------
     if "Hospedaje" in components:
         hotel_options = max(int(draft.get("hotel_options", 1) or 1), 1)
         caches = draft.get("hotel_image_caches", {}) or {}
@@ -474,52 +590,28 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             if not any([hotel_name, city, price, checkin, checkout]):
                 continue
 
-            add_subtotal(currency, price)
+            proposal_rows.append(
+                (f"Hospedaje · opción {idx}", currency, price)
+            )
+
             nights = (checkout - checkin).days if checkin and checkout else 0
             average = price / nights if price and nights > 0 else 0.0
 
-            story.append(P(f"HOSPEDAJE · OPCIÓN {idx}", "SIVESection"))
-
-            price_box = Table(
-                [
-                    [
-                        P("NOCHES", "SIVESmall"),
-                        P("HABITACIONES", "SIVESmall"),
-                        P("PROMEDIO / NOCHE", "SIVESmall"),
-                        P("TOTAL HOTEL", "SIVESmall"),
-                    ],
-                    [
-                        P(str(nights if nights > 0 else "—"), "SIVEMonoBold"),
-                        P(str(rooms), "SIVEMonoBold"),
-                        P(money(average, currency) if average else "—", "SIVEMonoBold"),
-                        P(money(price, currency) if price else "—", "SIVEPrice"),
-                    ],
-                ],
-                colWidths=[35 * mm, 40 * mm, 50 * mm, 50 * mm],
-            )
-            price_box.setStyle(
-                TableStyle(
-                    [
-                        ("BACKGROUND", (0, 0), (-1, -1), soft),
-                        ("BOX", (0, 0), (-1, -1), 0.45, line),
-                        ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
-                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                        ("TOPPADDING", (0, 0), (-1, -1), 5),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                    ]
-                )
-            )
+            block = [
+                P(f"HOSPEDAJE · OPCIÓN {idx}", "SIVESection"),
+                P(hotel_name or "Hotel", "SIVEHotel"),
+                P(city, "SIVESmall"),
+                Spacer(1, 1.5 * mm),
+            ]
 
             details = Table(
                 [
-                    [P("Hotel", "SIVESmall"), P(hotel_name)],
-                    [P("Destino", "SIVESmall"), P(city)],
                     [P("Habitación", "SIVESmall"), P(room)],
                     [P("Huéspedes", "SIVESmall"), P(str(guests))],
-                    [P("Estancia", "SIVESmall"), P(f"{checkin or '—'} → {checkout or '—'}")],
+                    [
+                        P("Estancia", "SIVESmall"),
+                        P(f"{checkin or '—'} → {checkout or '—'}"),
+                    ],
                     [P("Alimentos", "SIVESmall"), P(board)],
                 ],
                 colWidths=[34 * mm, 79 * mm],
@@ -544,39 +636,112 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             image = safe_image(image_bytes, image_url)
 
             if image:
-                hotel_block = Table([[details, image]], colWidths=[113 * mm, 62 * mm])
-                hotel_block.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-                story += [hotel_block, Spacer(1, 2 * mm)]
+                hotel_block = Table(
+                    [[details, image]],
+                    colWidths=[113 * mm, 62 * mm],
+                )
+                hotel_block.setStyle(
+                    TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")])
+                )
+                block.append(hotel_block)
             else:
-                story += [details, Spacer(1, 2 * mm)]
+                block.append(details)
+
+            block.append(Spacer(1, 2 * mm))
 
             links = []
             if hotel_url:
-                links.append(f'<a href="{hotel_url}" color="#2F9FA3">Página del hotel</a>')
+                links.append(
+                    f'<a href="{hotel_url}" color="#2F9FA3">Página del hotel</a>'
+                )
             if map_url:
-                links.append(f'<a href="{map_url}" color="#2F9FA3">Ver ubicación en Google Maps</a>')
+                links.append(
+                    f'<a href="{map_url}" color="#2F9FA3">Ver ubicación en Google Maps</a>'
+                )
             if links:
-                story.append(Paragraph("  ·  ".join(links), styles["SIVESmall"]))
-                story.append(Spacer(1, 2 * mm))
+                block += [
+                    Paragraph("  ·  ".join(links), styles["SIVESmall"]),
+                    Spacer(1, 2 * mm),
+                ]
 
-            story += [price_box, Spacer(1, 2 * mm)]
+            price_box = Table(
+                [
+                    [
+                        P("NOCHES", "SIVESmall"),
+                        P("HABITACIONES", "SIVESmall"),
+                        P("PROMEDIO / NOCHE", "SIVESmall"),
+                        P("TOTAL OPCIÓN", "SIVESmall"),
+                    ],
+                    [
+                        P(str(nights if nights > 0 else "—"), "SIVEMonoBold"),
+                        P(str(rooms), "SIVEMonoBold"),
+                        P(
+                            money(average, currency) if average else "—",
+                            "SIVEMonoBold",
+                        ),
+                        P(
+                            money(price, currency) if price else "—",
+                            "SIVEPrice",
+                        ),
+                    ],
+                ],
+                colWidths=[35 * mm, 40 * mm, 50 * mm, 50 * mm],
+            )
+            price_box.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), soft),
+                        ("BOX", (0, 0), (-1, -1), 0.45, line),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ]
+                )
+            )
+            block += [price_box, Spacer(1, 5 * mm)]
+            story.append(KeepTogether(block))
 
-            # The hotel fee is a section-level charge; show it only once.
-            if idx == hotel_options:
-                fee = float(captured_value("review_charge_total_hotel", 0.0) or 0.0)
-                if fee:
-                    total_eva_fees_mxn += fee
-                    story.append(P(f"Cargo por servicio EVA: MXN {fee:,.2f}", "SIVESmall"))
-
-            story.append(Spacer(1, 5 * mm))
-
-    # -------------------- SERVICIOS --------------------
+    # -------------------- SERVICIOS ÚNICOS --------------------
     service_specs = [
-        ("Seguro de viaje", "SEGURO DE VIAJE", "insurance_price", "insurance_currency", "review_charge_total_insurance"),
-        ("Traslados", "TRASLADO", "transfer_price", "transfer_currency", "review_charge_total_transfer"),
-        ("Renta de auto", "RENTA DE AUTO", "car_price", "car_currency", "review_charge_total_car"),
-        ("Tours o actividades", "TOUR O ACTIVIDAD", "tour_price", "tour_currency", "review_charge_total_tour"),
-        ("Otro servicio", "OTRO SERVICIO", "other_service_price", "other_service_currency", "review_charge_total_other"),
+        (
+            "Seguro de viaje",
+            "SEGURO DE VIAJE",
+            "insurance_price",
+            "insurance_currency",
+            "review_charge_total_insurance",
+        ),
+        (
+            "Traslados",
+            "TRASLADO",
+            "transfer_price",
+            "transfer_currency",
+            "review_charge_total_transfer",
+        ),
+        (
+            "Renta de auto",
+            "RENTA DE AUTO",
+            "car_price",
+            "car_currency",
+            "review_charge_total_car",
+        ),
+        (
+            "Tours o actividades",
+            "TOUR O ACTIVIDAD",
+            "tour_price",
+            "tour_currency",
+            "review_charge_total_tour",
+        ),
+        (
+            "Otro servicio",
+            "OTRO SERVICIO",
+            "other_service_price",
+            "other_service_currency",
+            "review_charge_total_other",
+        ),
     ]
 
     for component, title, price_key, currency_key, fee_key in service_specs:
@@ -586,8 +751,11 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         price = float(captured_value(price_key, 0.0) or 0.0)
         currency = captured_value(currency_key, "MXN")
         fee = float(captured_value(fee_key, 0.0) or 0.0)
-        add_subtotal(currency, price)
-        total_eva_fees_mxn += fee
+
+        if not price:
+            continue
+
+        proposal_rows.append((title.title(), currency, price))
 
         if component == "Seguro de viaje":
             details = [
@@ -598,7 +766,11 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         elif component == "Traslados":
             details = [
                 ("Tipo", captured_value("transfer_type", "")),
-                ("Ruta", f"{captured_value('transfer_origin', '')} → {captured_value('transfer_destination', '')}"),
+                (
+                    "Ruta",
+                    f"{captured_value('transfer_origin', '')} → "
+                    f"{captured_value('transfer_destination', '')}",
+                ),
             ]
         elif component == "Renta de auto":
             details = [
@@ -613,15 +785,31 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
         else:
             details = [
                 ("Servicio", captured_value("other_service_name", "")),
-                ("Descripción", captured_value("other_service_description", "")),
+                (
+                    "Descripción",
+                    captured_value("other_service_description", ""),
+                ),
             ]
 
-        rows = [[P(label, "SIVESmall"), P(value)] for label, value in details if value]
-        rows.append([P("Subtotal", "SIVESmall"), P(money(price, currency), "SIVEMonoBold")])
+        rows = [
+            [P(label, "SIVESmall"), P(value)]
+            for label, value in details
+            if value
+        ]
+        rows.append(
+            [
+                P("Precio propuesto", "SIVESmall"),
+                P(money(price, currency), "SIVEMonoBold"),
+            ]
+        )
         if fee:
-            rows.append([P("Cargo EVA", "SIVESmall"), P(f"MXN {fee:,.2f}", "SIVEMonoBold")])
+            rows.append(
+                [
+                    P("Cargo EVA aplicable", "SIVESmall"),
+                    P(f"MXN {fee:,.2f}", "SIVEMonoBold"),
+                ]
+            )
 
-        story.append(P(title, "SIVESection"))
         table = Table(rows, colWidths=[45 * mm, 130 * mm])
         table.setStyle(
             TableStyle(
@@ -636,32 +824,32 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 ]
             )
         )
-        story += [table, Spacer(1, 5 * mm)]
-
-    # -------------------- RESUMEN ECONÓMICO --------------------
-    story.append(P("RESUMEN ECONÓMICO", "SIVESection"))
-
-    summary_rows = [[P("CONCEPTO", "SIVEMonoBold"), P("IMPORTE", "SIVEMonoBold")]]
-    for currency, amount in sorted(subtotals_by_currency.items()):
-        summary_rows.append([P(f"Servicios cotizados · {currency}"), P(money(amount, currency), "SIVEMonoBold")])
-
-    if total_eva_fees_mxn:
-        summary_rows.append([P("Cargos por servicio EVA · MXN"), P(f"MXN {total_eva_fees_mxn:,.2f}", "SIVEMonoBold")])
-
-    # Only combine into one grand total when every service is MXN.
-    if subtotals_by_currency and set(subtotals_by_currency.keys()) == {"MXN"}:
-        grand_total = subtotals_by_currency["MXN"] + total_eva_fees_mxn
-        summary_rows.append([P("TOTAL GENERAL", "SIVEMonoBold"), P(f"MXN {grand_total:,.2f}", "SIVEPrice")])
-    else:
-        summary_rows.append(
-            [
-                P("TOTAL", "SIVEMonoBold"),
-                P("Se presenta por moneda para evitar conversiones implícitas.", "SIVESmall"),
-            ]
+        story.append(
+            KeepTogether(
+                [
+                    P(title, "SIVESection"),
+                    table,
+                    Spacer(1, 5 * mm),
+                ]
+            )
         )
 
-    summary_table = Table(summary_rows, colWidths=[105 * mm, 70 * mm])
-    summary_table.setStyle(
+    # -------------------- IMPORTES PROPUESTOS --------------------
+    story.append(P("IMPORTES PROPUESTOS", "SIVESection"))
+
+    proposal_table_rows = [
+        [P("OPCIÓN / SERVICIO", "SIVEMonoBold"), P("IMPORTE", "SIVEMonoBold")]
+    ]
+    for label, currency, amount in proposal_rows:
+        proposal_table_rows.append(
+            [P(label), P(money(amount, currency), "SIVEMonoBold")]
+        )
+
+    proposal_table = Table(
+        proposal_table_rows,
+        colWidths=[105 * mm, 70 * mm],
+    )
+    proposal_table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), soft),
@@ -675,17 +863,52 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             ]
         )
     )
-    story += [summary_table, Spacer(1, 5 * mm)]
-
-    story.append(
+    story += [
+        proposal_table,
+        Spacer(1, 2 * mm),
+        P(
+            "Las alternativas no se suman entre sí. El total final se calculará "
+            "cuando el cliente seleccione una opción de cada servicio y la "
+            "cotización se marque como vendida.",
+            "SIVESmall",
+        ),
+        Spacer(1, 4 * mm),
         P(
             "Precios sujetos a disponibilidad y cambios sin previo aviso. "
             "La cotización no representa una reservación hasta la confirmación correspondiente.",
             "SIVESmall",
-        )
-    )
+        ),
+    ]
 
-    doc.build(story)
+    def footer(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setStrokeColor(line)
+        canvas.setLineWidth(0.4)
+        canvas.line(
+            14 * mm,
+            10 * mm,
+            A4[0] - 14 * mm,
+            10 * mm,
+        )
+        canvas.setFont("Courier", 6.5)
+        canvas.setFillColor(muted)
+        canvas.drawString(
+            14 * mm,
+            6.5 * mm,
+            "PROYECTO EVA · SIVE",
+        )
+        canvas.drawRightString(
+            A4[0] - 14 * mm,
+            6.5 * mm,
+            f"PÁGINA {doc_obj.page}",
+        )
+        canvas.restoreState()
+
+    doc.build(
+        story,
+        onFirstPage=footer,
+        onLaterPages=footer,
+    )
     return buffer.getvalue()
 
 
@@ -999,14 +1222,17 @@ def page_new_quote() -> None:
         st.markdown("### Captura")
         if "Vuelos" in draft["componentes"]:
             st.markdown("#### Vuelos")
-            trip_type = st.radio(
-                "Tipo de viaje",
-                ["Viaje sencillo", "Viaje redondo", "Multidestino"],
-                horizontal=True,
-                key="flight_trip_type",
+            draft["flight_options"] = max(
+                int(draft.get("flight_options", 1) or 1),
+                1,
             )
+            draft.setdefault("flight_multicity_segments", {})
 
-            def render_segment(prefix: str, segment_number: int, title: str) -> None:
+            def render_segment(
+                prefix: str,
+                segment_number: int,
+                title: str,
+            ) -> None:
                 st.markdown(f"##### {title}")
 
                 airline_col, flight_col = st.columns([1.4, 1])
@@ -1039,14 +1265,16 @@ def page_new_quote() -> None:
                 dep_date.date_input(
                     "Fecha de salida *",
                     value=captured(
-                        f"{prefix}_departure_date_{segment_number}", None
+                        f"{prefix}_departure_date_{segment_number}",
+                        None,
                     ),
                     key=f"{prefix}_departure_date_{segment_number}",
                 )
                 dep_time.time_input(
                     "Hora de salida *",
                     value=captured(
-                        f"{prefix}_departure_time_{segment_number}", time(8, 0)
+                        f"{prefix}_departure_time_{segment_number}",
+                        time(8, 0),
                     ),
                     key=f"{prefix}_departure_time_{segment_number}",
                 )
@@ -1056,14 +1284,16 @@ def page_new_quote() -> None:
                 arr_date.date_input(
                     "Fecha de llegada *",
                     value=captured(
-                        f"{prefix}_arrival_date_{segment_number}", None
+                        f"{prefix}_arrival_date_{segment_number}",
+                        None,
                     ),
                     key=f"{prefix}_arrival_date_{segment_number}",
                 )
                 arr_time.time_input(
                     "Hora de llegada *",
                     value=captured(
-                        f"{prefix}_arrival_time_{segment_number}", time(12, 0)
+                        f"{prefix}_arrival_time_{segment_number}",
+                        time(12, 0),
                     ),
                     key=f"{prefix}_arrival_time_{segment_number}",
                 )
@@ -1076,7 +1306,12 @@ def page_new_quote() -> None:
                 )
                 cabin_col.selectbox(
                     "Cabina",
-                    ["Económica", "Premium Economy", "Ejecutiva", "Primera"],
+                    [
+                        "Económica",
+                        "Premium Economy",
+                        "Ejecutiva",
+                        "Primera",
+                    ],
                     key=f"{prefix}_cabin_{segment_number}",
                 )
 
@@ -1092,7 +1327,13 @@ def page_new_quote() -> None:
                     key=f"{prefix}_notes_{segment_number}",
                 )
 
-            def render_direction(label: str, prefix: str) -> None:
+            def render_direction(
+                option_idx: int,
+                label: str,
+                direction: str,
+            ) -> None:
+                prefix = f"flight_{option_idx}_{direction}"
+
                 st.markdown(f"### {label}")
 
                 connection_type = st.radio(
@@ -1111,7 +1352,7 @@ def page_new_quote() -> None:
                 else:
                     stops = 0
 
-                total_segments = stops + 1
+                total_segments = int(stops) + 1
 
                 for idx in range(total_segments):
                     render_segment(
@@ -1127,113 +1368,201 @@ def page_new_quote() -> None:
                         )
                         st.divider()
 
-            if trip_type == "Viaje sencillo":
-                render_direction("Trayecto", "outbound")
-
-            elif trip_type == "Viaje redondo":
-                render_direction("Ida", "outbound")
-                st.divider()
-                render_direction("Regreso", "return")
-
-            else:
-                st.info(
-                    "En multidestino, cada tramo representa una ruta distinta. "
-                    "Podrás agregar tantos como necesites."
-                )
-
-                if "multicity_segments" not in st.session_state:
-                    st.session_state.multicity_segments = 2
-
-                for idx in range(st.session_state.multicity_segments):
-                    render_segment(
-                        "multicity",
-                        idx + 1,
-                        f"Tramo {idx + 1}",
+            def render_flight_option(option_idx: int) -> None:
+                with st.container(border=True):
+                    st.markdown(
+                        f'<div class="sive-option-title">Opción de vuelo {option_idx}</div>',
+                        unsafe_allow_html=True,
                     )
-                    if idx < st.session_state.multicity_segments - 1:
+
+                    root = f"flight_{option_idx}"
+
+                    trip_type = st.radio(
+                        "Tipo de viaje",
+                        [
+                            "Viaje sencillo",
+                            "Viaje redondo",
+                            "Multidestino",
+                        ],
+                        horizontal=True,
+                        key=f"{root}_trip_type",
+                    )
+
+                    if trip_type == "Viaje sencillo":
+                        render_direction(
+                            option_idx,
+                            "Trayecto",
+                            "outbound",
+                        )
+
+                    elif trip_type == "Viaje redondo":
+                        render_direction(
+                            option_idx,
+                            "Ida",
+                            "outbound",
+                        )
                         st.divider()
+                        render_direction(
+                            option_idx,
+                            "Regreso",
+                            "return",
+                        )
 
-                add_col, remove_col = st.columns(2)
-                if add_col.button(
-                    "+ Agregar tramo",
-                    use_container_width=True,
-                    key="add_multicity_segment",
-                ):
-                    st.session_state.multicity_segments += 1
-                    st.rerun()
+                    else:
+                        st.info(
+                            "En multidestino, cada tramo representa una ruta distinta."
+                        )
 
-                if remove_col.button(
-                    "Quitar último tramo",
-                    use_container_width=True,
-                    disabled=st.session_state.multicity_segments <= 2,
-                    key="remove_multicity_segment",
-                ):
-                    st.session_state.multicity_segments -= 1
-                    st.rerun()
+                        segments = int(
+                            draft["flight_multicity_segments"].get(
+                                str(option_idx),
+                                2,
+                            )
+                        )
 
-            st.markdown("### Precio de la opción")
-            st.caption(
-                "Captura exactamente lo que muestra la aerolínea. SIVE hará el desglose."
-            )
+                        for idx in range(segments):
+                            render_segment(
+                                f"{root}_multicity",
+                                idx + 1,
+                                f"Tramo {idx + 1}",
+                            )
+                            if idx < segments - 1:
+                                st.divider()
 
-            pax_col, basis_col = st.columns([1, 1.5])
-            flight_pax = pax_col.number_input(
-                "PAX en esta opción",
-                min_value=1,
-                value=max(
-                    int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1),
-                    1,
-                ),
-                step=1,
-                key="flight_pax",
-            )
-            price_basis = basis_col.radio(
-                "El precio capturado corresponde a",
-                ["Total de la reserva", "Precio por pasajero"],
-                horizontal=True,
-                key="flight_price_basis",
-            )
+                        add_col, remove_col = st.columns(2)
+                        if add_col.button(
+                            "+ Agregar tramo",
+                            use_container_width=True,
+                            key=f"add_multicity_segment_{option_idx}",
+                        ):
+                            persist_capture_state()
+                            draft["flight_multicity_segments"][str(option_idx)] = (
+                                segments + 1
+                            )
+                            st.rerun()
 
-            price_col, currency_col = st.columns([1.4, 1])
-            entered_flight_price = price_col.number_input(
-                "Importe mostrado por la aerolínea",
-                min_value=0.0,
-                step=100.0,
-                key="flight_total_price",
-            )
-            flight_currency = currency_col.selectbox(
-                "Moneda",
-                ["MXN", "USD", "CAD", "EUR", "COP", "PEN", "BRL"],
-                key="flight_total_currency",
-            )
+                        if remove_col.button(
+                            "Quitar último tramo",
+                            use_container_width=True,
+                            disabled=segments <= 2,
+                            key=f"remove_multicity_segment_{option_idx}",
+                        ):
+                            persist_capture_state()
+                            draft["flight_multicity_segments"][str(option_idx)] = (
+                                segments - 1
+                            )
+                            st.rerun()
 
-            if price_basis == "Precio por pasajero":
-                fare_per_pax = float(entered_flight_price)
-                flight_subtotal = float(entered_flight_price) * int(flight_pax)
-            else:
-                flight_subtotal = float(entered_flight_price)
-                fare_per_pax = (
-                    flight_subtotal / int(flight_pax)
-                    if int(flight_pax) > 0
-                    else 0.0
-                )
+                    st.markdown("### Precio de la opción")
+                    st.caption(
+                        "Captura exactamente lo que muestra la aerolínea. "
+                        "SIVE hará el desglose por pasajero."
+                    )
 
-            if entered_flight_price > 0:
-                st.markdown(
-                    f"""
-                    <div class="sive-card">
-                      <div class="sive-kicker">DESGLOSE DE VUELO</div>
-                      <div class="sive-card-text">
-                        <span class="sive-mono">PAX {int(flight_pax):02d}</span>
-                        &nbsp;·&nbsp;
-                        Tarifa por pasajero <strong>{flight_currency} {fare_per_pax:,.2f}</strong>
-                        &nbsp;·&nbsp;
-                        Subtotal vuelos <strong>{flight_currency} {flight_subtotal:,.2f}</strong>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                    pax_col, basis_col = st.columns([1, 1.5])
+                    flight_pax = pax_col.number_input(
+                        "PAX en esta opción",
+                        min_value=1,
+                        value=max(
+                            int(
+                                captured(
+                                    f"{root}_pax",
+                                    draft.get("num_viajeros", 1),
+                                )
+                                or 1
+                            ),
+                            1,
+                        ),
+                        step=1,
+                        key=f"{root}_pax",
+                    )
+
+                    price_basis = basis_col.radio(
+                        "El precio capturado corresponde a",
+                        [
+                            "Total de la reserva",
+                            "Precio por pasajero",
+                        ],
+                        horizontal=True,
+                        key=f"{root}_price_basis",
+                    )
+
+                    price_col, currency_col = st.columns([1.4, 1])
+                    entered_price = price_col.number_input(
+                        "Importe mostrado por la aerolínea",
+                        min_value=0.0,
+                        step=100.0,
+                        key=f"{root}_total_price",
+                    )
+                    currency = currency_col.selectbox(
+                        "Moneda",
+                        [
+                            "MXN",
+                            "USD",
+                            "CAD",
+                            "EUR",
+                            "COP",
+                            "PEN",
+                            "BRL",
+                        ],
+                        key=f"{root}_total_currency",
+                    )
+
+                    if price_basis == "Precio por pasajero":
+                        fare_per_pax = float(entered_price)
+                        option_total = (
+                            float(entered_price) * int(flight_pax)
+                        )
+                    else:
+                        option_total = float(entered_price)
+                        fare_per_pax = (
+                            option_total / int(flight_pax)
+                            if int(flight_pax) > 0
+                            else 0.0
+                        )
+
+                    if entered_price > 0:
+                        st.markdown(
+                            f"""
+                            <div class="sive-card">
+                              <div class="sive-kicker">DESGLOSE DE LA OPCIÓN</div>
+                              <div class="sive-card-text">
+                                <span class="sive-mono">PAX {int(flight_pax):02d}</span>
+                                &nbsp;·&nbsp;
+                                Tarifa / PAX <strong>{currency} {fare_per_pax:,.2f}</strong>
+                                &nbsp;·&nbsp;
+                                Total opción <strong>{currency} {option_total:,.2f}</strong>
+                              </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+            for option_idx in range(
+                1,
+                draft["flight_options"] + 1,
+            ):
+                render_flight_option(option_idx)
+
+            add_flight_col, remove_flight_col = st.columns(2)
+            if add_flight_col.button(
+                "+ Agregar otra opción de vuelo",
+                use_container_width=True,
+                key="add_flight_option",
+            ):
+                persist_capture_state()
+                draft["flight_options"] += 1
+                st.rerun()
+
+            if remove_flight_col.button(
+                "Quitar última opción",
+                use_container_width=True,
+                disabled=draft["flight_options"] <= 1,
+                key="remove_flight_option",
+            ):
+                persist_capture_state()
+                draft["flight_options"] -= 1
+                st.rerun()
 
         if "Hospedaje" in draft["componentes"]:
             st.markdown("#### Hospedaje")
@@ -1915,53 +2244,86 @@ def page_new_quote() -> None:
             with st.container(border=True):
                 st.markdown("##### ✈️ Vuelos")
 
-                trip_type = captured("flight_trip_type", "Viaje sencillo")
-                st.write(f"**Tipo de viaje:** {trip_type}")
-
-                flight_pax = max(
-                    int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1),
+                flight_options = max(
+                    int(draft.get("flight_options", 1) or 1),
                     1,
                 )
-                entered_price = float(captured("flight_total_price", 0.0) or 0.0)
-                flight_currency = captured("flight_total_currency", "MXN")
-                price_basis = captured("flight_price_basis", "Total de la reserva")
+                any_flight = False
 
-                if price_basis == "Precio por pasajero":
-                    fare_per_pax = entered_price
-                    flight_subtotal = entered_price * flight_pax
-                else:
-                    flight_subtotal = entered_price
-                    fare_per_pax = flight_subtotal / flight_pax if flight_pax else 0.0
+                for option_idx in range(1, flight_options + 1):
+                    root = f"flight_{option_idx}"
+                    trip_type = captured(
+                        f"{root}_trip_type",
+                        "Viaje sencillo",
+                    )
+                    flight_pax = max(
+                        int(
+                            captured(
+                                f"{root}_pax",
+                                draft.get("num_viajeros", 1),
+                            )
+                            or 1
+                        ),
+                        1,
+                    )
+                    entered_price = float(
+                        captured(f"{root}_total_price", 0.0) or 0.0
+                    )
+                    currency = captured(
+                        f"{root}_total_currency",
+                        "MXN",
+                    )
+                    price_basis = captured(
+                        f"{root}_price_basis",
+                        "Total de la reserva",
+                    )
 
-                st.markdown(
-                    f"""
-                    <div class="sive-card">
-                      <div class="sive-kicker">PRECIO DE VUELOS</div>
-                      <div class="sive-card-text">
-                        <span class="sive-mono">PAX {flight_pax:02d}</span><br>
-                        Tarifa por pasajero: <strong>{flight_currency} {fare_per_pax:,.2f}</strong><br>
-                        Subtotal vuelos: <strong>{flight_currency} {flight_subtotal:,.2f}</strong>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                    if not entered_price:
+                        continue
+
+                    any_flight = True
+
+                    if price_basis == "Precio por pasajero":
+                        fare_per_pax = entered_price
+                        option_total = entered_price * flight_pax
+                    else:
+                        option_total = entered_price
+                        fare_per_pax = (
+                            option_total / flight_pax
+                            if flight_pax
+                            else 0.0
+                        )
+
+                    st.markdown(
+                        f'<div class="sive-option-title">Opción de vuelo {option_idx}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f'<div class="sive-option-meta">{trip_type} · PAX {flight_pax:02d}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.write(
+                        f"Tarifa por pasajero: **{currency} {fare_per_pax:,.2f}**"
+                    )
+                    st.write(
+                        f"Total de esta opción: **{currency} {option_total:,.2f}**"
+                    )
+
+                    if option_idx < flight_options:
+                        st.divider()
+
+                if not any_flight:
+                    st.caption("No hay opciones de vuelo con precio capturado.")
+
+                render_charge(
+                    "flights",
+                    chargeable_services["Vuelos"],
                 )
 
-                # Mostrar ruta principal si existe
-                route_candidates = [
-                    ("outbound_origin_1", "outbound_destination_1"),
-                    ("multicity_origin_1", "multicity_destination_1"),
-                ]
-                for origin_key, destination_key in route_candidates:
-                    origin = captured(origin_key, "")
-                    destination = captured(destination_key, "")
-                    if origin or destination:
-                        st.write(f"**Ruta:** {origin or '—'} → {destination or '—'}")
-                        break
-
-                render_charge("flights", chargeable_services["Vuelos"])
-
-                if st.button("Editar vuelos", key="review_edit_flights"):
+                if st.button(
+                    "Editar vuelos",
+                    key="review_edit_flights",
+                ):
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -1985,9 +2347,16 @@ def page_new_quote() -> None:
                         continue
 
                     any_hotel = True
-                    st.markdown(f"**Opción {hotel_idx} · {hotel_name or 'Hotel'}**")
+                    st.caption(f"Opción de hospedaje {hotel_idx}")
+                    st.markdown(
+                        f'<div class="sive-option-title">{hotel_name or "Hotel"}</div>',
+                        unsafe_allow_html=True,
+                    )
                     if hotel_city:
-                        st.caption(hotel_city)
+                        st.markdown(
+                            f'<div class="sive-option-meta">{hotel_city}</div>',
+                            unsafe_allow_html=True,
+                        )
                     if checkin and checkout:
                         nights = (checkout - checkin).days
                         if nights > 0:
@@ -2116,46 +2485,125 @@ def page_new_quote() -> None:
                     st.rerun()
 
         st.divider()
-        st.markdown("#### Resumen económico")
-        st.caption("Precios base antes de cargos EVA.")
+        st.markdown("#### Importes propuestos")
+        st.caption(
+            "Las alternativas se muestran por separado. No se suman entre sí "
+            "mientras el cliente no haya elegido qué opción comprar."
+        )
 
-        review_totals: dict[str, float] = {}
-
-        def add_review_total(currency: str, amount: float) -> None:
-            if amount:
-                review_totals[currency] = review_totals.get(currency, 0.0) + float(amount)
+        proposal_lines = []
 
         if "Vuelos" in draft["componentes"]:
-            flight_pax = max(int(captured("flight_pax", draft.get("num_viajeros", 1)) or 1), 1)
-            entered = float(captured("flight_total_price", 0.0) or 0.0)
-            currency = captured("flight_total_currency", "MXN")
-            basis = captured("flight_price_basis", "Total de la reserva")
-            flight_subtotal = entered * flight_pax if basis == "Precio por pasajero" else entered
-            add_review_total(currency, flight_subtotal)
-            st.write(f"**Vuelos:** {currency} {flight_subtotal:,.2f}")
+            for option_idx in range(
+                1,
+                max(int(draft.get("flight_options", 1) or 1), 1) + 1,
+            ):
+                root = f"flight_{option_idx}"
+                entered = float(
+                    captured(f"{root}_total_price", 0.0) or 0.0
+                )
+                currency = captured(
+                    f"{root}_total_currency",
+                    "MXN",
+                )
+                pax = max(
+                    int(
+                        captured(
+                            f"{root}_pax",
+                            draft.get("num_viajeros", 1),
+                        )
+                        or 1
+                    ),
+                    1,
+                )
+                basis = captured(
+                    f"{root}_price_basis",
+                    "Total de la reserva",
+                )
+                total = (
+                    entered * pax
+                    if basis == "Precio por pasajero"
+                    else entered
+                )
+                if total:
+                    proposal_lines.append(
+                        (
+                            f"Vuelo · opción {option_idx}",
+                            currency,
+                            total,
+                        )
+                    )
 
         if "Hospedaje" in draft["componentes"]:
-            for hotel_idx in range(1, max(int(draft.get("hotel_options", 1) or 1), 1) + 1):
-                amount = float(captured(f"hotel_price_{hotel_idx}", 0.0) or 0.0)
-                currency = captured(f"hotel_currency_{hotel_idx}", "MXN")
+            for hotel_idx in range(
+                1,
+                max(int(draft.get("hotel_options", 1) or 1), 1) + 1,
+            ):
+                amount = float(
+                    captured(f"hotel_price_{hotel_idx}", 0.0) or 0.0
+                )
+                currency = captured(
+                    f"hotel_currency_{hotel_idx}",
+                    "MXN",
+                )
                 if amount:
-                    add_review_total(currency, amount)
-                    st.write(f"**Hospedaje · opción {hotel_idx}:** {currency} {amount:,.2f}")
+                    proposal_lines.append(
+                        (
+                            f"Hospedaje · opción {hotel_idx}",
+                            currency,
+                            amount,
+                        )
+                    )
 
-        review_service_specs = [
-            ("Seguro de viaje", "Seguro", "insurance_price", "insurance_currency"),
-            ("Traslados", "Traslado", "transfer_price", "transfer_currency"),
-            ("Renta de auto", "Renta de auto", "car_price", "car_currency"),
-            ("Tours o actividades", "Tour / actividad", "tour_price", "tour_currency"),
-            ("Otro servicio", "Otro servicio", "other_service_price", "other_service_currency"),
+        service_rows = [
+            (
+                "Seguro de viaje",
+                "Seguro",
+                "insurance_price",
+                "insurance_currency",
+            ),
+            (
+                "Traslados",
+                "Traslado",
+                "transfer_price",
+                "transfer_currency",
+            ),
+            (
+                "Renta de auto",
+                "Renta de auto",
+                "car_price",
+                "car_currency",
+            ),
+            (
+                "Tours o actividades",
+                "Tour / actividad",
+                "tour_price",
+                "tour_currency",
+            ),
+            (
+                "Otro servicio",
+                "Otro servicio",
+                "other_service_price",
+                "other_service_currency",
+            ),
         ]
-        for component, label, price_key, currency_key in review_service_specs:
+
+        for component, label, price_key, currency_key in service_rows:
             if component in draft["componentes"]:
                 amount = float(captured(price_key, 0.0) or 0.0)
                 currency = captured(currency_key, "MXN")
                 if amount:
-                    add_review_total(currency, amount)
-                    st.write(f"**{label}:** {currency} {amount:,.2f}")
+                    proposal_lines.append(
+                        (label, currency, amount)
+                    )
+
+        if proposal_lines:
+            for label, currency, amount in proposal_lines:
+                st.write(
+                    f"**{label}:** {currency} {amount:,.2f}"
+                )
+        else:
+            st.caption("Aún no hay importes capturados.")
 
         st.divider()
         st.markdown("#### Cargos por servicio EVA")
@@ -2175,50 +2623,53 @@ def page_new_quote() -> None:
         for label, key in service_charge_keys:
             if label not in draft["componentes"]:
                 continue
-            amount = float(captured(f"review_charge_total_{key}", 0.0) or 0.0)
-            concept = captured(f"review_charge_text_{key}", "")
-            apply_mode = captured(f"review_charge_apply_{key}", "Por cotización")
+            amount = float(
+                captured(
+                    f"review_charge_total_{key}",
+                    0.0,
+                )
+                or 0.0
+            )
+            concept = captured(
+                f"review_charge_text_{key}",
+                "",
+            )
+            apply_mode = captured(
+                f"review_charge_apply_{key}",
+                "Por cotización",
+            )
             if amount > 0:
-                charge_rows.append((label, concept or "Cargo por servicio", amount, apply_mode))
+                charge_rows.append(
+                    (
+                        label,
+                        concept or "Cargo por servicio",
+                        amount,
+                        apply_mode,
+                    )
+                )
                 total_charge_mxn += amount
 
         if charge_rows:
             for label, concept, amount, apply_mode in charge_rows:
                 st.write(
-                    f"**{label}:** {concept} · ${amount:,.2f} MXN · {apply_mode.lower()}"
+                    f"**{label}:** {concept} · "
+                    f"${amount:,.2f} MXN · {apply_mode.lower()}"
                 )
-            st.success(f"Total cargos EVA: ${total_charge_mxn:,.2f} MXN")
+            st.success(
+                f"Cargos EVA potenciales: ${total_charge_mxn:,.2f} MXN"
+            )
         else:
-            st.caption("Esta cotización no tiene cargos por servicio.")
+            st.caption(
+                "Esta cotización no tiene cargos por servicio."
+            )
 
-        st.markdown("#### Total de la cotización")
-        if review_totals:
-            if set(review_totals.keys()) == {"MXN"}:
-                grand_total = review_totals["MXN"] + total_charge_mxn
-                st.markdown(
-                    f"""
-                    <div class="sive-card">
-                      <div class="sive-kicker">TOTAL GENERAL</div>
-                      <div class="sive-title sive-mono" style="font-size:1.6rem;">
-                        MXN {grand_total:,.2f}
-                      </div>
-                      <div class="sive-card-text">
-                        Servicios MXN {review_totals['MXN']:,.2f}
-                        + cargos EVA MXN {total_charge_mxn:,.2f}
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                for currency, amount in sorted(review_totals.items()):
-                    st.write(f"**Subtotal {currency}:** {currency} {amount:,.2f}")
-                if total_charge_mxn:
-                    st.write(f"**Cargos EVA MXN:** MXN {total_charge_mxn:,.2f}")
-                st.info(
-                    "Hay más de una moneda. SIVE muestra subtotales por moneda "
-                    "para no hacer una conversión implícita."
-                )
+        st.markdown("#### Total final")
+        st.info(
+            "SIVE no calcula un total general en esta etapa porque hay "
+            "alternativas de vuelo y/o hospedaje. El total se calculará "
+            "cuando el cliente seleccione sus opciones y la cotización "
+            "se marque como **Vendida**."
+        )
 
         b1, b2 = st.columns(2)
         if b1.button("Volver a captura", use_container_width=True):
@@ -2237,7 +2688,7 @@ def page_new_quote() -> None:
         st.markdown("### Documento y guardado")
         st.success("El borrador está listo para generar documento o guardar.")
 
-        st.markdown("#### Vista previa del documento")
+        st.markdown("#### Vista previa de la propuesta")
         if draft["modo_viajero"] == "Buscar viajero existente":
             traveler_name = draft["viajero_existente"] or "Viajero"
         else:
