@@ -9,6 +9,14 @@ import requests
 import streamlit as st
 
 try:
+    from eva_api import EvaApi, EvaApiError
+    EVA_API_AVAILABLE = True
+except Exception:
+    EvaApi = None
+    EvaApiError = RuntimeError
+    EVA_API_AVAILABLE = False
+
+try:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_RIGHT
     from reportlab.lib.pagesizes import A4
@@ -83,6 +91,10 @@ def init_state() -> None:
     defaults: dict[str, Any] = {
         "page": "Inicio",
         "quote_step": 1,
+        "catalogs_loaded": False,
+        "catalogs_error": "",
+        "airlines_catalog": [],
+        "airports_catalog": [],
         "draft": {
             "modo_viajero": "Buscar viajero existente",
             "viajero_existente": "",
@@ -182,57 +194,18 @@ def _eva_logo_path() -> Path | None:
     )
 
 
-def _airline_logo_local_path(airline_name: str) -> Path | None:
-    """Local fallback for airline branding.
-
-    Preferred future source is the airline catalog loaded once per session.
-    Local files make the PDF resilient when the catalog/logo URL is unavailable.
-    """
-    base_dir = Path(__file__).resolve().parent
-    slug = _brand_slug(airline_name)
-
-    aliases = {
-        "aeromexico": ["aeromexico", "am"],
-        "volaris": ["volaris", "y4"],
-        "avianca": ["avianca", "av"],
-        "latam": ["latam", "la"],
-        "air_canada": ["air_canada", "ac"],
-        "united": ["united", "ua"],
-        "american_airlines": ["american_airlines", "american", "aa"],
-        "delta": ["delta", "dl"],
-        "copa": ["copa", "cm"],
-        "iberia": ["iberia", "ib"],
-    }
-
-    tokens = [slug]
-    for canonical, alternatives in aliases.items():
-        if slug == canonical or slug in alternatives or any(a in slug for a in alternatives):
-            tokens = [canonical, *alternatives, slug]
-            break
-
-    candidates = []
-    for token in dict.fromkeys(tokens):
-        for ext in ("png", "jpg", "jpeg", "webp"):
-            candidates.append(base_dir / "assets" / "airlines" / f"{token}.{ext}")
-            candidates.append(base_dir / "airlines" / f"{token}.{ext}")
-
-    return _first_existing_path(candidates)
-
-
-def _airline_logo_source(draft: dict[str, Any], airline_name: str) -> dict[str, Any] | None:
-    """Resolve airline logo from the future cached catalog, then local assets.
-
-    Expected cached catalog shape can be either:
-      draft["airline_logo_catalog"]["Avianca"] = {"logo_url": "..."}
-    or:
-      draft["airline_logo_catalog"]["AV"] = {"name": "Avianca", "logo_url": "..."}
-    """
+def _airline_logo_source(
+    draft: dict[str, Any],
+    airline_name: str,
+) -> dict[str, Any] | None:
+    """Resolve airline logo exclusively from 10_CAT_AEROLINEAS."""
     catalog = draft.get("airline_logo_catalog", {}) or {}
     normalized = _brand_slug(airline_name)
 
     for key, item in catalog.items():
         if isinstance(item, str):
             item = {"logo_url": item}
+
         if not isinstance(item, dict):
             continue
 
@@ -240,25 +213,411 @@ def _airline_logo_source(draft: dict[str, Any], airline_name: str) -> dict[str, 
             str(key),
             str(item.get("name", "")),
             str(item.get("nombre", "")),
+            str(item.get("NOMBRE", "")),
             str(item.get("iata", "")),
-            str(item.get("code", "")),
+            str(item.get("IATA", "")),
+            str(item.get("icao", "")),
+            str(item.get("ICAO", "")),
         ]
-        if any(_brand_slug(name) == normalized for name in names if name):
+
+        if any(
+            _brand_slug(name) == normalized
+            for name in names
+            if name
+        ):
             if item.get("bytes"):
                 return {"bytes": item["bytes"]}
+
             url = (
                 item.get("logo_url")
                 or item.get("LOGO_URL")
                 or item.get("url")
+                or item.get("URL_LOGO")
             )
             if url:
                 return {"url": url}
 
-    local = _airline_logo_local_path(airline_name)
-    if local:
-        return {"path": local}
-
     return None
+
+
+
+
+def _clean_catalog_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def initialize_catalogs() -> None:
+    """One bootstrap read per SIVE session.
+
+    10_CAT_AEROLINEAS and 11_CAT_AEROPUERTOS remain local in session memory
+    during quote capture. No Google request is made when selecting fields.
+    """
+    if st.session_state.get("catalogs_loaded"):
+        return
+
+    if not EVA_API_AVAILABLE:
+        st.session_state.catalogs_error = (
+            "No encuentro eva_api.py en el proyecto."
+        )
+        return
+
+    try:
+        api_url = str(st.secrets["eva"]["api_url"]).strip()
+        api_token = str(st.secrets["eva"]["api_token"]).strip()
+
+        api = EvaApi(api_url, api_token)
+        bootstrap = api.bootstrap()
+
+        airlines = list(bootstrap.get("aerolineas", []) or [])
+        airports = list(bootstrap.get("aeropuertos", []) or [])
+
+        st.session_state.airlines_catalog = airlines
+        st.session_state.airports_catalog = airports
+        st.session_state.catalogs_loaded = True
+        st.session_state.catalogs_error = ""
+
+        # Make the airline catalog available to the local PDF generator.
+        logo_catalog: dict[str, dict[str, Any]] = {}
+        for row in airlines:
+            name = _clean_catalog_text(
+                row.get("NOMBRE")
+                or row.get("NOMBRE_COMERCIAL")
+            )
+            iata = _clean_catalog_text(row.get("IATA")).upper()
+            icao = _clean_catalog_text(row.get("ICAO")).upper()
+            logo_url = _clean_catalog_text(
+                row.get("LOGO_URL")
+                or row.get("URL_LOGO")
+            )
+
+            record = {
+                "name": name,
+                "IATA": iata,
+                "ICAO": icao,
+                "LOGO_URL": logo_url,
+            }
+
+            for key in (name, iata, icao):
+                if key:
+                    logo_catalog[key] = record
+
+        st.session_state.draft["airline_logo_catalog"] = logo_catalog
+
+    except Exception as exc:
+        st.session_state.catalogs_error = str(exc)
+
+
+def airline_rows() -> list[dict[str, Any]]:
+    rows = []
+    for row in st.session_state.get("airlines_catalog", []):
+        active = str(
+            row.get("ACTIVA")
+            or row.get("ACTIVO")
+            or row.get("ESTATUS")
+            or "SI"
+        ).strip().upper()
+
+        if active in {"NO", "0", "FALSE", "INACTIVA", "INACTIVO"}:
+            continue
+
+        iata = _clean_catalog_text(row.get("IATA")).upper()
+        icao = _clean_catalog_text(row.get("ICAO")).upper()
+        name = _clean_catalog_text(
+            row.get("NOMBRE")
+            or row.get("NOMBRE_COMERCIAL")
+        )
+
+        if not name:
+            continue
+
+        rows.append(
+            {
+                **row,
+                "_iata": iata,
+                "_icao": icao,
+                "_name": name,
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["_name"].lower(),
+            item["_iata"],
+        ),
+    )
+
+
+def airport_rows() -> list[dict[str, Any]]:
+    rows = []
+
+    for row in st.session_state.get("airports_catalog", []):
+        active = str(
+            row.get("ACTIVO")
+            or row.get("ACTIVA")
+            or row.get("ESTATUS")
+            or "SI"
+        ).strip().upper()
+
+        if active in {"NO", "0", "FALSE", "INACTIVO", "INACTIVA"}:
+            continue
+
+        iata = _clean_catalog_text(row.get("IATA")).upper()
+        icao = _clean_catalog_text(row.get("ICAO")).upper()
+        city = _clean_catalog_text(
+            row.get("CIUDAD")
+            or row.get("CITY")
+        )
+        airport = _clean_catalog_text(
+            row.get("NOMBRE_AEROPUERTO")
+            or row.get("AEROPUERTO")
+            or row.get("NOMBRE")
+        )
+        country = _clean_catalog_text(
+            row.get("PAIS")
+            or row.get("COUNTRY")
+        )
+
+        if not iata:
+            continue
+
+        rows.append(
+            {
+                **row,
+                "_iata": iata,
+                "_icao": icao,
+                "_city": city,
+                "_airport": airport,
+                "_country": country,
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["_iata"],
+            item["_city"].lower(),
+        ),
+    )
+
+
+def airline_option_label(row: dict[str, Any]) -> str:
+    parts = []
+
+    if row.get("_iata"):
+        parts.append(row["_iata"])
+
+    if row.get("_name"):
+        parts.append(row["_name"])
+
+    if row.get("_icao"):
+        parts.append(f"ICAO {row['_icao']}")
+
+    return " · ".join(parts)
+
+
+def airport_option_label(row: dict[str, Any]) -> str:
+    first = " · ".join(
+        part
+        for part in [
+            row.get("_iata", ""),
+            row.get("_city", ""),
+        ]
+        if part
+    )
+
+    detail = " · ".join(
+        part
+        for part in [
+            row.get("_airport", ""),
+            row.get("_country", ""),
+        ]
+        if part
+    )
+
+    return f"{first} — {detail}" if detail else first
+
+
+def _find_catalog_index(
+    rows: list[dict[str, Any]],
+    *,
+    saved_iata: str = "",
+    saved_name: str = "",
+) -> int:
+    if not rows:
+        return 0
+
+    saved_iata = _clean_catalog_text(saved_iata).upper()
+    saved_name = _clean_catalog_text(saved_name).lower()
+
+    for idx, row in enumerate(rows, start=1):
+        if saved_iata and row.get("_iata") == saved_iata:
+            return idx
+
+        if (
+            saved_name
+            and _clean_catalog_text(
+                row.get("_name")
+                or row.get("_city")
+            ).lower() == saved_name
+        ):
+            return idx
+
+    return 0
+
+
+def airline_selector(
+    prefix: str,
+    segment_number: int,
+) -> dict[str, Any] | None:
+    rows = airline_rows()
+    key_base = f"{prefix}_airline_{segment_number}"
+
+    if not rows:
+        st.warning(
+            "No hay aerolíneas disponibles en 10_CAT_AEROLINEAS."
+        )
+        return None
+
+    saved_iata = captured(
+        f"{key_base}_iata",
+        "",
+    )
+    saved_name = captured(
+        f"{key_base}_name",
+        "",
+    )
+
+    options: list[dict[str, Any] | None] = [None, *rows]
+    index = _find_catalog_index(
+        rows,
+        saved_iata=saved_iata,
+        saved_name=saved_name,
+    )
+
+    selected = st.selectbox(
+        "Aerolínea *",
+        options,
+        index=index,
+        format_func=lambda item: (
+            "Buscar por nombre, IATA o ICAO…"
+            if item is None
+            else airline_option_label(item)
+        ),
+        key=f"{key_base}_choice",
+        help=(
+            "Puedes escribir Aeroméxico, AM o AMX. "
+            "La búsqueda se hace sobre el catálogo ya cargado."
+        ),
+    )
+
+    if selected:
+        st.session_state[f"{key_base}_name"] = selected["_name"]
+        st.session_state[f"{key_base}_iata"] = selected["_iata"]
+        st.session_state[f"{key_base}_icao"] = selected["_icao"]
+        st.session_state[f"{key_base}_logo_url"] = _clean_catalog_text(
+            selected.get("LOGO_URL")
+            or selected.get("URL_LOGO")
+        )
+
+        st.markdown(
+            f'<div class="sive-option-meta">'
+            f'<span class="sive-mono">{selected["_iata"] or "—"}</span>'
+            f' · {selected["_name"]}'
+            + (
+                f' · ICAO <span class="sive-mono">{selected["_icao"]}</span>'
+                if selected["_icao"]
+                else ""
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    return selected
+
+
+def airport_selector(
+    prefix: str,
+    segment_number: int,
+    field_name: str,
+    label: str,
+) -> dict[str, Any] | None:
+    rows = airport_rows()
+    key_base = f"{prefix}_{field_name}_{segment_number}"
+
+    if not rows:
+        st.warning(
+            "No hay aeropuertos disponibles en 11_CAT_AEROPUERTOS."
+        )
+        return None
+
+    saved_iata = captured(
+        f"{key_base}_iata",
+        "",
+    )
+    saved_city = captured(
+        f"{key_base}_city",
+        "",
+    )
+
+    options: list[dict[str, Any] | None] = [None, *rows]
+    index = _find_catalog_index(
+        rows,
+        saved_iata=saved_iata,
+        saved_name=saved_city,
+    )
+
+    selected = st.selectbox(
+        label,
+        options,
+        index=index,
+        format_func=lambda item: (
+            "Escribe IATA, ciudad o aeropuerto…"
+            if item is None
+            else airport_option_label(item)
+        ),
+        key=f"{key_base}_choice",
+        help=(
+            "Ejemplo: escribe MEX, Ciudad de México o Benito Juárez. "
+            "SIVE filtrará el catálogo localmente."
+        ),
+    )
+
+    if selected:
+        st.session_state[f"{key_base}_iata"] = selected["_iata"]
+        st.session_state[f"{key_base}_icao"] = selected["_icao"]
+        st.session_state[f"{key_base}_city"] = selected["_city"]
+        st.session_state[f"{key_base}_airport"] = selected["_airport"]
+        st.session_state[f"{key_base}_country"] = selected["_country"]
+
+        # Backward-compatible display value used by some existing screens.
+        st.session_state[key_base] = selected["_iata"]
+
+        st.markdown(
+            f'<div class="sive-option-meta">'
+            f'<span class="sive-mono"><strong>{selected["_iata"]}</strong></span>'
+            + (
+                f' · {selected["_city"]}'
+                if selected["_city"]
+                else ""
+            )
+            + (
+                f'<br><span style="font-size:.78rem;">'
+                f'{selected["_airport"]}'
+                + (
+                    f' · {selected["_country"]}'
+                    if selected["_country"]
+                    else ""
+                )
+                + "</span>"
+                if selected["_airport"]
+                else ""
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    return selected
 
 
 def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
@@ -591,7 +950,7 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             for direction_probe in ("outbound", "return", "multicity"):
                 for segment_probe in range(1, 10):
                     candidate = captured_value(
-                        f"{prefix_root}_{direction_probe}_airline_{segment_probe}",
+                        f"{prefix_root}_{direction_probe}_airline_{segment_probe}_name",
                         "",
                     )
                     if candidate:
@@ -721,7 +1080,12 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
 
                     segment_rows.append(
                         [
-                            P(f"{airline} {number}".strip() or "Vuelo", "SIVEMono"),
+                            P(
+                                f"{airline_iata} {number}".strip()
+                                or airline
+                                or "Vuelo",
+                                "SIVEMonoBold",
+                            ),
                             P(f"{origin or '—'} → {destination or '—'}", "SIVEMonoBold"),
                             P(
                                 f"SAL {dep_text}<br/>LLE {arr_text}",
@@ -1446,6 +1810,20 @@ def page_new_quote() -> None:
             st.rerun()
 
     elif step == 3:
+        initialize_catalogs()
+
+        if st.session_state.get("catalogs_loaded"):
+            st.caption(
+                f"Catálogos listos · "
+                f"{len(airline_rows())} aerolíneas · "
+                f"{len(airport_rows())} aeropuertos"
+            )
+        elif st.session_state.get("catalogs_error"):
+            st.warning(
+                "SIVE no pudo cargar los catálogos de Google Sheets. "
+                f"{st.session_state.catalogs_error}"
+            )
+
         # Streamlit removes widget state when a widget is no longer rendered.
         # Restore the previously captured quote before showing the editor again.
         explicit_default_tokens = (
@@ -1500,30 +1878,85 @@ def page_new_quote() -> None:
             ) -> None:
                 st.markdown(f"##### {title}")
 
-                airline_col, flight_col = st.columns([1.4, 1])
-                airline_col.text_input(
-                    "Aerolínea *",
-                    placeholder="Ej. Volaris, Aeroméxico, LATAM",
-                    key=f"{prefix}_airline_{segment_number}",
-                )
-                flight_col.text_input(
-                    "Número de vuelo",
-                    placeholder="Ej. Y4 245",
-                    key=f"{prefix}_number_{segment_number}",
-                )
+                airline_col, flight_col = st.columns([1.55, 1])
+
+                with airline_col:
+                    selected_airline = airline_selector(
+                        prefix,
+                        segment_number,
+                    )
+
+                with flight_col:
+                    iata_prefix = (
+                        selected_airline["_iata"]
+                        if selected_airline
+                        else captured(
+                            f"{prefix}_airline_{segment_number}_iata",
+                            "",
+                        )
+                    )
+
+                    flight_digits = st.text_input(
+                        "Número de vuelo",
+                        value=str(
+                            captured(
+                                f"{prefix}_number_{segment_number}",
+                                "",
+                            )
+                            or ""
+                        ),
+                        placeholder="Ej. 123",
+                        key=f"{prefix}_number_{segment_number}",
+                        help=(
+                            "Captura solo los dígitos. "
+                            "SIVE agregará el IATA de la aerolínea."
+                        ),
+                    )
+
+                    clean_digits = "".join(
+                        ch
+                        for ch in str(flight_digits)
+                        if ch.isdigit()
+                    )
+
+                    if flight_digits != clean_digits:
+                        st.warning(
+                            "Captura únicamente los dígitos del vuelo."
+                        )
+
+                    flight_display = (
+                        f"{iata_prefix} {clean_digits}".strip()
+                    )
+
+                    if flight_display:
+                        st.markdown(
+                            f'<div class="sive-card">'
+                            f'<div class="sive-kicker">VUELO</div>'
+                            f'<div class="sive-title sive-mono" '
+                            f'style="font-size:1.28rem;">'
+                            f'{flight_display}'
+                            f'</div></div>',
+                            unsafe_allow_html=True,
+                        )
 
                 st.caption("Ruta")
-                origin, destination = st.columns(2)
-                origin.text_input(
-                    "Origen *",
-                    placeholder="Ciudad o aeropuerto",
-                    key=f"{prefix}_origin_{segment_number}",
-                )
-                destination.text_input(
-                    "Destino *",
-                    placeholder="Ciudad o aeropuerto",
-                    key=f"{prefix}_destination_{segment_number}",
-                )
+                origin_col, destination_col = st.columns(2)
+
+                with origin_col:
+                    airport_selector(
+                        prefix,
+                        segment_number,
+                        "origin",
+                        "Origen *",
+                    )
+
+                with destination_col:
+                    airport_selector(
+                        prefix,
+                        segment_number,
+                        "destination",
+                        "Destino *",
+                    )
 
                 st.caption("Salida")
                 dep_date, dep_time = st.columns(2)
@@ -2563,7 +2996,7 @@ def page_new_quote() -> None:
                     for direction_probe in ("outbound", "return", "multicity"):
                         for segment_probe in range(1, 10):
                             candidate = captured(
-                                f"{root}_{direction_probe}_airline_{segment_probe}",
+                                f"{root}_{direction_probe}_airline_{segment_probe}_name",
                                 "",
                             )
                             if candidate:
@@ -3008,9 +3441,9 @@ def page_new_quote() -> None:
                 st.caption("✓ Branding de aerolínea disponible para el PDF")
             else:
                 st.caption(
-                    "Los nombres de aerolínea aparecerán con estilo de boleto. "
-                    "Los logos se activarán al cargar el catálogo de aerolíneas "
-                    "o archivos en `assets/airlines/`."
+                    "La aerolínea está identificada desde 10_CAT_AEROLINEAS. "
+                    "Si su LOGO_URL está vacío, el PDF mostrará el nombre "
+                    "y código IATA sin logo."
                 )
 
         if draft["modo_viajero"] == "Buscar viajero existente":
@@ -3108,6 +3541,7 @@ def page_reports() -> None:
 
 
 def main() -> None:
+    initialize_catalogs()
     header()
     page = st.session_state.page
     if page == "Inicio":
