@@ -695,7 +695,9 @@ def airport_selector(
             unsafe_allow_html=True,
         )
 
-    return s
+    return selected
+
+
 def _normalize_image_url(url: str) -> str:
     """Convert common Google Drive share links into direct image URLs."""
     url = _clean_catalog_text(url)
