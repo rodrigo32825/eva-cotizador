@@ -66,6 +66,46 @@ st.markdown(
       .sive-mono {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; letter-spacing: .01em;}
       .sive-option-title {font-size: 1.18rem; font-weight: 750; line-height: 1.25; color: var(--eva-text); margin: .15rem 0 .15rem 0;}
       .sive-option-meta {font-size: .86rem; color: var(--eva-muted); margin-bottom: .45rem;}
+      .sive-main-brand {padding: .25rem 0 .15rem 0;}
+      .sive-main-title {
+        color: var(--eva-text);
+        font-size: clamp(1.55rem, 3.3vw, 2.15rem);
+        line-height: 1.08;
+        font-weight: 650;
+        margin-top: .15rem;
+      }
+      .sive-main-subtitle {
+        color: var(--eva-muted);
+        margin-top: .35rem;
+        font-size: .98rem;
+      }
+      .sive-header-divider {
+        height: 1px;
+        background: var(--eva-border);
+        margin: .85rem 0 1.35rem 0;
+      }
+      .home-intro {
+        margin: .2rem 0 1.1rem 0;
+      }
+      .home-intro-title {
+        font-size: 1.55rem;
+        font-weight: 650;
+        color: var(--eva-text);
+        line-height: 1.15;
+      }
+      .home-intro-text {
+        color: var(--eva-muted);
+        margin-top: .25rem;
+      }
+      div[data-testid="stButton"] > button[kind="primary"],
+      div[data-testid="stButton"] > button[kind="secondary"] {
+        transition: transform .08s ease, border-color .12s ease, box-shadow .12s ease;
+      }
+      div[data-testid="stButton"] > button:hover {
+        transform: translateY(-1px);
+        border-color: var(--eva-accent);
+        box-shadow: 0 6px 18px rgba(47,159,163,.08);
+      }
       div[data-testid="stButton"] > button {
         min-height: 74px;
         border-radius: 18px;
@@ -81,6 +121,8 @@ st.markdown(
         .block-container {padding-left: .8rem; padding-right: .8rem; padding-top: .7rem;}
         .sive-header {border-radius: 18px; padding: 1rem;}
         .sive-title {font-size: 1.75rem;}
+        .sive-main-title {font-size: 1.42rem;}
+        .sive-main-subtitle {font-size: .9rem;}
       }
     </style>
     """,
@@ -134,23 +176,43 @@ def go(page: str) -> None:
 
 
 def header() -> None:
+    logo_path = _eva_logo_path()
+
+    with st.container():
+        left, right = st.columns([1, 3.2], vertical_alignment="center")
+
+        with left:
+            if logo_path:
+                st.image(str(logo_path), width=145)
+            else:
+                st.markdown(
+                    '<div class="sive-kicker">PROYECTO EVA</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with right:
+            st.markdown(
+                """
+                <div class="sive-main-brand">
+                  <div class="sive-kicker">SIVE</div>
+                  <div class="sive-main-title">Sistema Integral de Viajes EVA</div>
+                  <div class="sive-main-subtitle">Cotizador y control de viajes</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
     st.markdown(
-        """
-        <div class="sive-header">
-          <div class="sive-kicker">Proyecto EVA</div>
-          <div class="sive-title">Cotizador y control de viajes</div>
-          <div class="sive-subtitle">SIVE · Sistema Integral de Viajes EVA</div>
-        </div>
-        """,
+        '<div class="sive-header-divider"></div>',
         unsafe_allow_html=True,
     )
 
 
 def top_navigation() -> None:
-    labels = ["Inicio", "Nueva", "Cotizaciones", "Pasajeros", "Reportes"]
+    labels = ["Inicio", "Nueva", "Cotizaciones", "Viajeros", "Ventas"]
     current = st.session_state.page
-    index_map = {"Inicio": 0, "Nueva cotización": 1, "Abrir cotización": 2, "Pasajeros": 3, "Ventas y reportes": 4}
-    reverse_map = {"Inicio": "Inicio", "Nueva": "Nueva cotización", "Cotizaciones": "Abrir cotización", "Pasajeros": "Pasajeros", "Reportes": "Ventas y reportes"}
+    index_map = {"Inicio": 0, "Nueva cotización": 1, "Abrir cotización": 2, "Viajeros": 3, "Ventas": 4}
+    reverse_map = {"Inicio": "Inicio", "Nueva": "Nueva cotización", "Cotizaciones": "Abrir cotización", "Viajeros": "Viajeros", "Ventas": "Ventas"}
     selected = st.radio("Navegación", labels, index=index_map.get(current, 0), horizontal=True, label_visibility="collapsed", key="main_navigation")
     mapped = reverse_map[selected]
     if mapped != current:
@@ -248,13 +310,14 @@ def _clean_catalog_text(value: Any) -> str:
 
 
 def initialize_catalogs() -> None:
-    """One bootstrap read per SIVE session.
-
-    10_CAT_AEROLINEAS and 11_CAT_AEROPUERTOS remain local in session memory
-    during quote capture. No Google request is made when selecting fields.
-    """
+    """Load quote catalogs once per session, only when capture needs them."""
     if st.session_state.get("catalogs_loaded"):
         return
+
+    if st.session_state.get("_catalog_load_attempted"):
+        return
+
+    st.session_state["_catalog_load_attempted"] = True
 
     if not EVA_API_AVAILABLE:
         st.session_state.catalogs_error = (
@@ -1624,37 +1687,59 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
 
 
 def page_home() -> None:
-    st.markdown("## Menú principal")
-    st.caption("Selecciona la tarea que deseas realizar.")
+    st.markdown(
+        """
+        <div class="home-intro">
+          <div class="home-intro-title">¿Qué quieres hacer?</div>
+          <div class="home-intro-text">
+            Selecciona una tarea para comenzar.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button(
-        "👤  Viajeros\nAlta, consulta y edición",
-        use_container_width=True,
-        key="home_travelers",
-    ):
-        go("Viajeros")
+    col1, col2 = st.columns(2)
 
-    if st.button(
-        "✈️  Nueva cotización\nCrear una propuesta de viaje",
-        use_container_width=True,
-        type="primary",
-        key="home_new_quote",
-    ):
-        go("Nueva cotización")
+    with col1:
+        if st.button(
+            "👤  Viajeros\nAlta, consulta y edición",
+            use_container_width=True,
+            key="home_travelers",
+        ):
+            go("Viajeros")
 
-    if st.button(
-        "📄  Abrir cotización\nConsultar, editar o generar PDF",
-        use_container_width=True,
-        key="home_open_quote",
-    ):
-        go("Abrir cotización")
+    with col2:
+        if st.button(
+            "✈️  Nueva cotización\nCrear una propuesta de viaje",
+            use_container_width=True,
+            type="primary",
+            key="home_new_quote",
+        ):
+            go("Nueva cotización")
 
-    if st.button(
-        "📊  Ventas\nRevisar ventas, cargos y rentabilidad",
-        use_container_width=True,
-        key="home_sales",
-    ):
-        go("Ventas")
+    col3, col4 = st.columns(2)
+
+    with col3:
+        if st.button(
+            "📄  Abrir cotización\nConsultar, editar o generar PDF",
+            use_container_width=True,
+            key="home_open_quote",
+        ):
+            go("Abrir cotización")
+
+    with col4:
+        if st.button(
+            "📊  Ventas\nRevisar ventas, cargos y rentabilidad",
+            use_container_width=True,
+            key="home_sales",
+        ):
+            go("Ventas")
+
+    st.caption(
+        "Los catálogos de aerolíneas y aeropuertos se cargan únicamente "
+        "cuando entras a capturar una cotización."
+    )
 
 def page_new_quote() -> None:
     if st.button("← Volver al inicio", key="back_new_quote"):
@@ -1905,6 +1990,14 @@ def page_new_quote() -> None:
                 "SIVE no pudo cargar los catálogos de Google Sheets. "
                 f"{st.session_state.catalogs_error}"
             )
+            if st.button(
+                "Reintentar carga de catálogos",
+                key="retry_catalogs",
+            ):
+                st.session_state["_catalog_load_attempted"] = False
+                st.session_state["catalogs_error"] = ""
+                initialize_catalogs()
+                st.rerun()
 
         # Streamlit removes widget state when a widget is no longer rendered.
         # Restore the previously captured quote before showing the editor again.
@@ -3657,7 +3750,6 @@ def page_reports() -> None:
 
 
 def main() -> None:
-    initialize_catalogs()
     header()
     page = st.session_state.page
     if page == "Inicio":
