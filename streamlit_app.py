@@ -24,6 +24,7 @@ try:
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas as pdfcanvas
     from reportlab.platypus import (
         Image as RLImage,
         KeepTogether,
@@ -142,6 +143,7 @@ def init_state() -> None:
             "modo_viajero": "Buscar viajero existente",
             "viajero_existente": "",
             "capture_state": {},
+            "folio": "",
             "hotel_image_cache": None,
             "hotel_image_caches": {},
             "hotel_options": 1,
@@ -404,6 +406,190 @@ def initialize_catalogs() -> None:
 
     except Exception as exc:
         st.session_state.catalogs_error = str(exc)
+
+
+def _eva_api_client() -> EvaApi:
+    """Create the EVA API client from Streamlit Secrets."""
+    if not EVA_API_AVAILABLE:
+        raise RuntimeError("No encuentro eva_api.py en el proyecto.")
+
+    try:
+        api_url = str(st.secrets["eva"]["api_url"]).strip()
+        api_token = str(st.secrets["eva"]["api_token"]).strip()
+    except Exception as exc:
+        raise RuntimeError(
+            "No encuentro la configuración `eva.api_url` / `eva.api_token` "
+            "en Streamlit Secrets."
+        ) from exc
+
+    if not api_url or not api_token:
+        raise RuntimeError("La conexión con Google Sheets no está configurada.")
+
+    return EvaApi(api_url, api_token)
+
+
+def _quote_date_value(value: Any) -> str:
+    """Normalize date-like values for the Apps Script bridge."""
+    if value in (None, ""):
+        return ""
+
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    value_text = _clean_catalog_text(value)
+    if not value_text:
+        return ""
+
+    # Preserve values already formatted as YYYY-MM-DD.
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value_text):
+        return value_text
+
+    return value_text
+
+
+def _quote_summary_for_save(
+    draft: dict[str, Any],
+    captured_value,
+) -> dict[str, Any]:
+    """Build the 01_COTIZACIONES record without rereading Google Sheets."""
+    if draft.get("modo_viajero") == "Buscar viajero existente":
+        principal = _clean_catalog_text(draft.get("viajero_existente")) or "Viajero"
+    else:
+        principal = " ".join(
+            _clean_catalog_text(part)
+            for part in (
+                draft.get("nombres", ""),
+                draft.get("apellido_paterno", ""),
+                draft.get("apellido_materno", ""),
+            )
+            if _clean_catalog_text(part)
+        ) or "Viajero"
+
+    client_name = (
+        _clean_catalog_text(draft.get("cliente_contacto"))
+        or principal
+    )
+
+    destinations: list[str] = []
+    travel_dates: list[str] = []
+
+    def add_destination(value: Any) -> None:
+        clean = _clean_catalog_text(value)
+        if clean and clean not in destinations:
+            destinations.append(clean)
+
+    def add_date(value: Any) -> None:
+        normalized = _quote_date_value(value)
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", normalized) and normalized not in travel_dates:
+            travel_dates.append(normalized)
+
+    # Flights: enough information to build the commercial quote header.
+    if "Vuelos" in draft.get("componentes", []):
+        flight_options = max(int(draft.get("flight_options", 1) or 1), 1)
+
+        for option_idx in range(1, flight_options + 1):
+            root = f"flight_{option_idx}"
+
+            for direction in ("outbound", "return", "multicity"):
+                for segment_idx in range(1, 10):
+                    airline_name = captured_value(
+                        f"{root}_{direction}_airline_{segment_idx}_name",
+                        "",
+                    )
+                    origin = captured_value(
+                        f"{root}_{direction}_origin_{segment_idx}_iata",
+                        "",
+                    )
+                    destination = captured_value(
+                        f"{root}_{direction}_destination_{segment_idx}_iata",
+                        "",
+                    )
+
+                    # A segment is considered present when any core route field exists.
+                    if not any([airline_name, origin, destination]):
+                        continue
+
+                    add_destination(destination)
+                    add_date(
+                        captured_value(
+                            f"{root}_{direction}_departure_date_{segment_idx}",
+                            "",
+                        )
+                    )
+                    add_date(
+                        captured_value(
+                            f"{root}_{direction}_arrival_date_{segment_idx}",
+                            "",
+                        )
+                    )
+
+    # Hotels.
+    if "Hospedaje" in draft.get("componentes", []):
+        hotel_options = max(int(draft.get("hotel_options", 1) or 1), 1)
+
+        for idx in range(1, hotel_options + 1):
+            add_destination(captured_value(f"hotel_city_{idx}", ""))
+            add_date(captured_value(f"hotel_checkin_{idx}", ""))
+            add_date(captured_value(f"hotel_checkout_{idx}", ""))
+
+    travel_dates.sort()
+    date_start = travel_dates[0] if travel_dates else ""
+    date_end = travel_dates[-1] if travel_dates else ""
+
+    destination_summary = " · ".join(destinations[:6])
+    if len(destinations) > 6:
+        destination_summary += " · …"
+
+    return {
+        "CLIENTE_NOMBRE": client_name,
+        "CLIENTE_EMAIL": _clean_catalog_text(draft.get("correo")),
+        "CLIENTE_TELEFONO": _clean_catalog_text(draft.get("telefono")),
+        "DESTINO_RESUMEN": destination_summary,
+        "FECHA_INICIO_VIAJE": date_start,
+        "FECHA_FIN_VIAJE": date_end,
+        "NUM_PASAJEROS": max(int(draft.get("num_viajeros", 1) or 1), 1),
+        "MONEDA": "MXN",
+        "ESTATUS": "BORRADOR",
+        "NOTAS_INTERNAS": "Cotización creada desde SIVE.",
+    }
+
+
+def save_quote_header(
+    draft: dict[str, Any],
+    captured_value,
+    api: EvaApi,
+) -> dict[str, Any]:
+    """Create/update the main quotation record and keep one permanent folio."""
+    payload = _quote_summary_for_save(draft, captured_value)
+    folio = _clean_catalog_text(draft.get("folio"))
+
+    if folio:
+        record = api.update_record(
+            "01_COTIZACIONES",
+            folio,
+            payload,
+            id_field="COTIZACION_ID",
+        )
+    else:
+        actor_name = _clean_catalog_text(draft.get("asesor_nombre"))
+        record = api.create_record(
+            "01_COTIZACIONES",
+            payload,
+            actor_name=actor_name,
+        )
+        folio = _clean_catalog_text(record.get("COTIZACION_ID"))
+
+        if not folio:
+            raise RuntimeError(
+                "Google Sheets guardó la cotización pero no devolvió un folio."
+            )
+
+        draft["folio"] = folio
+
+    return record
 
 
 def airline_rows() -> list[dict[str, Any]]:
@@ -1154,6 +1340,9 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     "PROPUESTA DE VIAJE<br/>"
                     '<font name="Courier" size="7" color="#737B80">'
                     "SIVE · SISTEMA INTEGRAL DE VIAJES EVA"
+                    "</font><br/>"
+                    '<font name="Courier-Bold" size="7.5" color="#2F3437">'
+                    f"FOLIO · {draft.get('folio') or 'SIN FOLIO'}"
                     "</font>",
                     styles["SIVETitle"],
                 ),
@@ -1331,36 +1520,9 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                 else P(main_airline.upper() if main_airline else "VUELO", "SIVEMonoBold")
             )
 
-            option_header = Table(
-                [
-                    [
-                        brand_cell,
-                        Paragraph(
-                            f"OPCIÓN {option_idx}<br/>"
-                            f'<font name="Courier" size="7" color="#737B80">'
-                            f"{trip_type.upper()}"
-                            "</font>",
-                            styles["SIVESection"],
-                        ),
-                    ]
-                ],
-                colWidths=[70 * mm, 105 * mm],
-            )
-            option_header.setStyle(
-                TableStyle(
-                    [
-                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                        ("LINEBELOW", (0, 0), (-1, 0), 0.6, teal),
-                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
-                    ]
-                )
-            )
-
-            option_flow = [
-                option_header,
-                Spacer(1, 1.8 * mm),
-            ]
+            # The airline brand now lives INSIDE the itinerary table.
+            # This keeps the flight option visually as one cohesive card.
+            option_flow = []
 
             price_table = Table(
                 [
@@ -1392,8 +1554,6 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     ]
                 )
             )
-            option_flow += [price_table, Spacer(1, 2 * mm)]
-
             segment_rows = []
             for direction in ("outbound", "return", "multicity"):
                 segment_prefix = f"{prefix_root}_{direction}"
@@ -1485,33 +1645,105 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
                     )
 
             if segment_rows:
-                seg_table = Table(
+                option_meta = Paragraph(
+                    f"<b>OPCIÓN {option_idx}</b><br/>"
+                    f'<font name="Courier" size="7" color="#737B80">'
+                    f"{trip_type.upper()}"
+                    "</font>",
+                    ParagraphStyle(
+                        "SIVEFlightOptionMeta",
+                        parent=styles["SIVESection"],
+                        alignment=TA_RIGHT,
+                        spaceAfter=0,
+                    ),
+                )
+
+                flight_table_data = [
                     [
-                        [
-                            P("VUELO", "SIVESmall"),
-                            P("RUTA", "SIVESmall"),
-                            P("HORARIO", "SIVESmall"),
-                            P("TARIFA / EQUIPAJE", "SIVESmall"),
-                        ]
-                    ]
-                    + segment_rows,
+                        brand_cell,
+                        "",
+                        option_meta,
+                        "",
+                    ],
+                    [
+                        P("VUELO", "SIVESmall"),
+                        P("RUTA", "SIVESmall"),
+                        P("HORARIO", "SIVESmall"),
+                        P("TARIFA / EQUIPAJE", "SIVESmall"),
+                    ],
+                ] + segment_rows
+
+                seg_table = Table(
+                    flight_table_data,
                     colWidths=[36 * mm, 43 * mm, 54 * mm, 42 * mm],
                 )
                 seg_table.setStyle(
                     TableStyle(
                         [
-                            ("BACKGROUND", (0, 0), (-1, 0), soft),
-                            ("BOX", (0, 0), (-1, -1), 0.45, line),
-                            ("INNERGRID", (0, 0), (-1, -1), 0.3, line),
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                            ("TOPPADDING", (0, 0), (-1, -1), 4),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                            # Brand row
+                            ("SPAN", (0, 0), (1, 0)),
+                            ("SPAN", (2, 0), (3, 0)),
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.white),
+                            ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+                            ("ALIGN", (2, 0), (3, 0), "RIGHT"),
+                            ("TOPPADDING", (0, 0), (-1, 0), 7),
+                            ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+                            ("LEFTPADDING", (0, 0), (1, 0), 7),
+                            ("RIGHTPADDING", (2, 0), (3, 0), 7),
+                            ("LINEBELOW", (0, 0), (-1, 0), 0.9, teal),
+
+                            # Column headings
+                            ("BACKGROUND", (0, 1), (-1, 1), soft),
+                            ("VALIGN", (0, 1), (-1, -1), "TOP"),
+
+                            # Whole card
+                            ("BOX", (0, 0), (-1, -1), 0.55, line),
+                            ("INNERGRID", (0, 1), (-1, -1), 0.3, line),
+                            ("LEFTPADDING", (0, 1), (-1, -1), 5),
+                            ("RIGHTPADDING", (0, 1), (-1, -1), 5),
+                            ("TOPPADDING", (0, 1), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
                         ]
                     )
                 )
-                option_flow += [seg_table, Spacer(1, 2 * mm)]
+                option_flow += [
+                    seg_table,
+                    Spacer(1, 1.8 * mm),
+                    price_table,
+                    Spacer(1, 2 * mm),
+                ]
+            else:
+                # If an option has pricing but no fully captured segment yet,
+                # keep a compact branded strip so the layout does not break.
+                fallback_brand = Table(
+                    [[brand_cell, Paragraph(
+                        f"OPCIÓN {option_idx}<br/>"
+                        f'<font name="Courier" size="7" color="#737B80">'
+                        f"{trip_type.upper()}"
+                        "</font>",
+                        styles["SIVESection"],
+                    )]],
+                    colWidths=[80 * mm, 95 * mm],
+                )
+                fallback_brand.setStyle(
+                    TableStyle(
+                        [
+                            ("BOX", (0, 0), (-1, -1), 0.55, line),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 7),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                        ]
+                    )
+                )
+                option_flow += [
+                    fallback_brand,
+                    Spacer(1, 1.8 * mm),
+                    price_table,
+                    Spacer(1, 2 * mm),
+                ]
 
             # One EVA flight fee is shown as a commercial condition,
             # but is not included in a grand total while alternatives remain open.
@@ -1878,51 +2110,120 @@ def build_quote_pdf(draft: dict[str, Any], captured_value) -> bytes:
             ]
         )
     )
-    story += [
-        proposal_table,
-        Spacer(1, 2 * mm),
-        P(
-            "Las alternativas no se suman entre sí. El total final se calculará "
-            "cuando el cliente seleccione una opción de cada servicio y la "
-            "cotización se marque como vendida.",
-            "SIVESmall",
-        ),
-        Spacer(1, 4 * mm),
-        P(
-            "Precios sujetos a disponibilidad y cambios sin previo aviso. "
-            "La cotización no representa una reservación hasta la confirmación correspondiente.",
-            "SIVESmall",
-        ),
+    conditions_heading = Table(
+        [[Paragraph("CONDICIONES DE LA COTIZACIÓN", styles["SIVESection"])]],
+        colWidths=[175 * mm],
+    )
+    conditions_heading.setStyle(
+        TableStyle(
+            [
+                ("LINEBELOW", (0, 0), (-1, 0), 0.8, teal),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+            ]
+        )
+    )
+
+    conditions_text = [
+        "Los importes mostrados incluyen los impuestos aplicables y los cargos "
+        "del proveedor contemplados al momento de elaborar esta cotización.",
+        "Las opciones presentadas son alternativas y no se suman entre sí. "
+        "El total final se determinará cuando el cliente seleccione una opción "
+        "de cada servicio.",
+        "Las tarifas y la disponibilidad pueden cambiar sin previo aviso hasta "
+        "que la reservación, emisión o contratación del servicio quede confirmada.",
+        "La cotización no constituye una reservación. Los cambios, cancelaciones, "
+        "reembolsos y demás condiciones quedan sujetos a las políticas de la "
+        "tarifa y del proveedor seleccionado.",
+        "El cargo por servicio de Proyecto EVA, cuando aplique, se muestra por "
+        "separado dentro de la propuesta.",
     ]
 
-    def footer(canvas, doc_obj):
-        canvas.saveState()
-        canvas.setStrokeColor(line)
-        canvas.setLineWidth(0.4)
-        canvas.line(
-            14 * mm,
-            10 * mm,
-            A4[0] - 14 * mm,
-            10 * mm,
+    conditions_rows = []
+    for item in conditions_text:
+        conditions_rows.append(
+            [
+                Paragraph("•", styles["SIVEMonoBold"]),
+                P(item, "SIVESmall"),
+            ]
         )
-        canvas.setFont("Courier", 6.5)
-        canvas.setFillColor(muted)
-        canvas.drawString(
-            14 * mm,
-            6.5 * mm,
-            "PROYECTO EVA · travel@proyectoeva.mx · SIVE",
+
+    conditions_table = Table(
+        conditions_rows,
+        colWidths=[6 * mm, 169 * mm],
+    )
+    conditions_table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
         )
-        canvas.drawRightString(
-            A4[0] - 14 * mm,
-            6.5 * mm,
-            f"PÁGINA {doc_obj.page}",
-        )
-        canvas.restoreState()
+    )
+
+    story += [
+        proposal_table,
+        Spacer(1, 4 * mm),
+        conditions_heading,
+        Spacer(1, 1.5 * mm),
+        conditions_table,
+    ]
+
+    class NumberedFooterCanvas(pdfcanvas.Canvas):
+        """Canvas que conoce el total de páginas antes de dibujar el footer."""
+
+        def __init__(self, *args, **kwargs):
+            pdfcanvas.Canvas.__init__(self, *args, **kwargs)
+            self._saved_page_states = []
+
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total_pages = len(self._saved_page_states)
+
+            for page_state in self._saved_page_states:
+                self.__dict__.update(page_state)
+                self._draw_sive_footer(total_pages)
+                pdfcanvas.Canvas.showPage(self)
+
+            pdfcanvas.Canvas.save(self)
+
+        def _draw_sive_footer(self, total_pages):
+            self.saveState()
+            self.setStrokeColor(line)
+            self.setLineWidth(0.4)
+            self.line(
+                14 * mm,
+                10 * mm,
+                A4[0] - 14 * mm,
+                10 * mm,
+            )
+            self.setFont("Courier", 6.5)
+            self.setFillColor(muted)
+            footer_folio = _clean_catalog_text(draft.get("folio"))
+            footer_left = "PROYECTO EVA"
+            if footer_folio:
+                footer_left += f" · {footer_folio}"
+            footer_left += " · travel@proyectoeva.mx · SIVE"
+            self.drawString(
+                14 * mm,
+                6.5 * mm,
+                footer_left,
+            )
+            self.drawRightString(
+                A4[0] - 14 * mm,
+                6.5 * mm,
+                f"{self._pageNumber}/{total_pages}",
+            )
+            self.restoreState()
 
     doc.build(
         story,
-        onFirstPage=footer,
-        onLaterPages=footer,
+        canvasmaker=NumberedFooterCanvas,
     )
     return buffer.getvalue()
 
@@ -3939,28 +4240,61 @@ def page_new_quote() -> None:
             + ", ".join(draft.get("componentes", []))
         )
 
-        try:
-            pdf_bytes = build_quote_pdf(draft, captured)
-            st.download_button(
-                "Generar / descargar PDF",
-                data=pdf_bytes,
-                file_name="Cotizacion_Proyecto_EVA.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                type="primary",
-            )
-        except Exception as exc:
-            st.error(f"No pudimos generar el PDF: {exc}")
+        folio = _clean_catalog_text(draft.get("folio"))
 
-        st.button(
-            "Guardar cotización",
-            use_container_width=True,
-            disabled=True,
-            help="La sincronización con Google Sheets se conectará en la siguiente fase.",
-        )
+        if not folio:
+            st.info(
+                "Guarda la cotización para asignarle su folio permanente. "
+                "El PDF final se habilitará después de guardar."
+            )
+
+            if st.button(
+                "Guardar cotización y asignar folio",
+                type="primary",
+                use_container_width=True,
+                key="save_quote_first_time",
+            ):
+                try:
+                    api = _eva_api_client()
+                    record = save_quote_header(draft, captured, api)
+                    folio = _clean_catalog_text(record.get("COTIZACION_ID"))
+                    draft["folio"] = folio
+                    st.success(f"Cotización guardada · {folio}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No pudimos guardar la cotización: {exc}")
+
+        else:
+            st.success(f"Folio de cotización: **{folio}**")
+
+            try:
+                pdf_bytes = build_quote_pdf(draft, captured)
+                st.download_button(
+                    "Generar / descargar PDF",
+                    data=pdf_bytes,
+                    file_name=f"Cotizacion_{folio}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary",
+                )
+            except Exception as exc:
+                st.error(f"No pudimos generar el PDF: {exc}")
+
+            if st.button(
+                "Actualizar datos generales de la cotización",
+                use_container_width=True,
+                key="update_quote_header",
+            ):
+                try:
+                    api = _eva_api_client()
+                    save_quote_header(draft, captured, api)
+                    st.success(f"Cotización {folio} actualizada.")
+                except Exception as exc:
+                    st.error(f"No pudimos actualizar la cotización: {exc}")
 
         st.caption(
-            "El PDF se genera directamente con el borrador local; no consulta Google Sheets."
+            "El folio se genera en Google Sheets una sola vez y se conserva "
+            "aunque vuelvas a editar o regenerar el PDF."
         )
 
         if st.button("Regresar a revisión", use_container_width=True):
