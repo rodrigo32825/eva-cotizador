@@ -15,10 +15,9 @@ class EvaApiError(RuntimeError):
 class EvaApi:
     base_url: str
     token: str
-
     # Apps Script puede tardar más en la primera llamada después de estar inactivo.
     connect_timeout_seconds: int = 15
-    read_timeout_seconds: int = 35
+    read_timeout_seconds: int = 90
 
     def _post(
         self,
@@ -36,10 +35,7 @@ class EvaApi:
                 response = requests.post(
                     self.base_url,
                     json=body,
-                    timeout=(
-                        self.connect_timeout_seconds,
-                        self.read_timeout_seconds,
-                    ),
+                    timeout=(self.connect_timeout_seconds, self.read_timeout_seconds),
                     allow_redirects=True,
                 )
                 response.raise_for_status()
@@ -47,87 +43,31 @@ class EvaApi:
 
                 if not data.get("ok"):
                     raise EvaApiError(
-                        str(
-                            data.get("error")
-                            or "La operación no pudo completarse."
-                        )
+                        str(data.get("error") or "La operación no pudo completarse.")
                     )
-
                 return data
 
             except EvaApiError:
                 raise
-
-            except requests.HTTPError as exc:
-                last_error = exc
-                status_code = (
-                    exc.response.status_code
-                    if exc.response is not None
-                    else 0
-                )
-
-                # Apps Script usa redirecciones temporales. En consultas seguras,
-                # repetimos desde la URL principal cuando Google devuelve un
-                # error temporal o un enlace de redirección vencido.
-                retryable_statuses = {
-                    404,
-                    408,
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                }
-
-                if (
-                    retry_safe
-                    and status_code in retryable_statuses
-                    and attempt < attempts
-                ):
-                    time.sleep(1.0 * attempt)
-                    continue
-
-                raise EvaApiError(
-                    "No fue posible conectar con Google Sheets. "
-                    f"Google respondió con el error {status_code}."
-                ) from exc
-
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-
-                if retry_safe and attempt < attempts:
-                    time.sleep(1.0 * attempt)
+                if attempt < attempts:
+                    time.sleep(1.5 * attempt)
                     continue
-
                 break
-
             except requests.RequestException as exc:
-                last_error = exc
-
-                if retry_safe and attempt < attempts:
-                    time.sleep(1.0 * attempt)
-                    continue
-
                 raise EvaApiError(
                     f"No fue posible conectar con Google Sheets: {exc}"
                 ) from exc
-
             except ValueError as exc:
-                last_error = exc
-
-                if retry_safe and attempt < attempts:
-                    time.sleep(1.0 * attempt)
-                    continue
-
                 raise EvaApiError(
                     "La conexión respondió con un formato no válido."
                 ) from exc
 
         raise EvaApiError(
-            "Google Sheets tardó demasiado en responder. "
-            "Espera unos segundos y vuelve a sincronizar. "
-            "Si estabas guardando un registro, revisa primero la hoja "
-            "para confirmar que no se haya creado antes de intentarlo otra vez."
+            "Google Sheets tardó demasiado en responder. Espera unos segundos y "
+            "vuelve a sincronizar. Si estabas guardando un registro, revisa primero "
+            "la hoja para confirmar que no se haya creado antes de intentarlo otra vez."
         ) from last_error
 
     def health(self) -> dict[str, Any]:
@@ -186,10 +126,8 @@ class EvaApi:
             "id_value": id_value,
             "data": data,
         }
-
         if id_field:
             payload["id_field"] = id_field
-
         result = self._post("update", **payload)
         return dict(result.get("record", {}))
 
@@ -198,4 +136,18 @@ class EvaApi:
             "get_quote_bundle",
             retry_safe=True,
             quote_id=quote_id,
+        )
+
+    def save_quote_bundle(
+        self,
+        bundle: dict[str, Any],
+        *,
+        actor_name: str = "",
+    ) -> dict[str, Any]:
+        # Un guardado completo no se reintenta automáticamente: Apps Script
+        # puede haber alcanzado a escribir antes de un timeout del cliente.
+        return self._post(
+            "save_quote_bundle",
+            bundle=bundle,
+            actor_name=actor_name,
         )
