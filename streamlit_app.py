@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from datetime import time
 from io import BytesIO
 from datetime import date, datetime
@@ -152,6 +154,7 @@ def init_state() -> None:
             "flight_multicity_segments": {},
             "airline_logo_bytes": {},
             "companions": [],
+            "passenger_ids": [],
             "nombres": "",
             "apellido_paterno": "",
             "apellido_materno": "",
@@ -591,6 +594,613 @@ def save_quote_header(
         draft["folio"] = folio
 
     return record
+
+
+def _json_meta(data: dict[str, Any]) -> str:
+    return "SIVE_STATE:" + json.dumps(data, ensure_ascii=False, default=str, separators=(",", ":"))
+
+
+def _parse_json_meta(value: Any) -> dict[str, Any]:
+    text = _clean_catalog_text(value)
+    if not text.startswith("SIVE_STATE:"):
+        return {}
+    try:
+        parsed = json.loads(text[len("SIVE_STATE:"):])
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _date_iso(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = _clean_catalog_text(value)
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    return text[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", text) else text
+
+
+def _time_hhmm(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    if isinstance(value, datetime):
+        return value.strftime("%H:%M")
+    text = _clean_catalog_text(value)
+    match = re.search(r"(?:T|\s)(\d{2}):(\d{2})", text)
+    if match:
+        return f"{match.group(1)}:{match.group(2)}"
+    if re.match(r"^\d{2}:\d{2}", text):
+        return text[:5]
+    return text
+
+
+def _parse_date_value(value: Any):
+    text = _date_iso(value)
+    try:
+        return date.fromisoformat(text) if text else None
+    except Exception:
+        return None
+
+
+def _parse_time_value(value: Any, fallback: time = time(12, 0)) -> time:
+    text = _time_hhmm(value)
+    try:
+        return time.fromisoformat(text) if text else fallback
+    except Exception:
+        return fallback
+
+
+def _clear_quote_widget_state() -> None:
+    prefixes = (
+        "flight_", "hotel_", "insurance_", "transfer_", "tour_", "car_",
+        "other_service_", "review_charge_", "companion_", "step1_num_viajeros",
+    )
+    for key in list(st.session_state.keys()):
+        if any(str(key).startswith(prefix) for prefix in prefixes):
+            del st.session_state[key]
+
+
+def _option_charge_meta(captured_value, service_name: str, default_enabled: bool) -> dict[str, Any]:
+    default_mode = "Estándar $250 MXN" if default_enabled else "Sin cargo"
+    mode = captured_value(f"review_charge_mode_{service_name}", default_mode)
+    amount = float(captured_value(f"review_charge_total_{service_name}", 0.0) or 0.0)
+    return {
+        "mode": mode,
+        "concept": captured_value(f"review_charge_text_{service_name}", "Cargo por servicio"),
+        "unit_amount": float(captured_value(f"review_charge_amount_{service_name}", 0.0) or 0.0),
+        "apply": captured_value(f"review_charge_apply_{service_name}", "Por cotización"),
+        "total": amount,
+    }
+
+
+def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
+    """Serialize the complete SIVE draft into the existing normalized Sheets layout."""
+    if draft.get("modo_viajero") == "Buscar viajero existente":
+        principal_name = _clean_catalog_text(draft.get("viajero_existente")) or "Viajero"
+        principal_names = principal_name
+        paternal = ""
+        maternal = ""
+    else:
+        principal_names = _clean_catalog_text(draft.get("nombres"))
+        paternal = _clean_catalog_text(draft.get("apellido_paterno"))
+        maternal = _clean_catalog_text(draft.get("apellido_materno"))
+        principal_name = " ".join(part for part in (principal_names, paternal, maternal) if part).strip() or "Viajero"
+
+    quote = {
+        "COTIZACION_ID": _clean_catalog_text(draft.get("folio")),
+        "CLIENTE_NOMBRE": _clean_catalog_text(draft.get("cliente_contacto")) or principal_name,
+        "CLIENTE_EMAIL": _clean_catalog_text(draft.get("correo")),
+        "CLIENTE_TELEFONO": _clean_catalog_text(draft.get("telefono")),
+        "NUM_PASAJEROS": max(int(draft.get("num_viajeros", 1) or 1), 1),
+        "MONEDA": "MXN",
+        "ESTATUS": "BORRADOR",
+        "NOTAS_INTERNAS": _json_meta({
+            "componentes": list(draft.get("componentes", [])),
+            "modo_viajero": draft.get("modo_viajero", "Registrar nuevo viajero"),
+        }),
+    }
+
+    passenger_ids = list(draft.get("passenger_ids", []))
+    passengers: list[dict[str, Any]] = [{
+        "_ALIAS": "PAX01",
+        "PASAJERO_ID": _clean_catalog_text(passenger_ids[0]) if passenger_ids else "",
+        "NOMBRES": principal_names or principal_name,
+        "APELLIDO_PATERNO": paternal,
+        "APELLIDO_MATERNO": maternal,
+        "NOMBRE_COMPLETO_DOCUMENTO": principal_name,
+        "EMAIL": _clean_catalog_text(draft.get("correo")),
+        "TELEFONO": _clean_catalog_text(draft.get("telefono")),
+        "ACTIVO": "SI",
+    }]
+    relations: list[dict[str, Any]] = [{
+        "_PASAJERO_ALIAS": "PAX01",
+        "ORDEN_PASAJERO": 1,
+        "TIPO_PASAJERO": "ADULTO",
+        "PASAJERO_PRINCIPAL": "SI",
+        "ACTIVO": "SI",
+    }]
+
+    companions = list(draft.get("companions", []))
+    for idx in range(2, max(int(draft.get("num_viajeros", 1) or 1), 1) + 1):
+        item = companions[idx - 2] if idx - 2 < len(companions) else {}
+        is_tba = bool(item.get("tba", False)) or not _clean_catalog_text(item.get("name"))
+        full_name = "TBA · Nombre por definir" if is_tba else _clean_catalog_text(item.get("name"))
+        alias = f"PAX{idx:02d}"
+        passengers.append({
+            "_ALIAS": alias,
+            "PASAJERO_ID": _clean_catalog_text(passenger_ids[idx - 1]) if idx - 1 < len(passenger_ids) else "",
+            "NOMBRES": full_name,
+            "NOMBRE_COMPLETO_DOCUMENTO": full_name,
+            "NOTAS": "TBA" if is_tba else "",
+            "ACTIVO": "SI",
+        })
+        relations.append({
+            "_PASAJERO_ALIAS": alias,
+            "ORDEN_PASAJERO": idx,
+            "TIPO_PASAJERO": "ADULTO",
+            "PASAJERO_PRINCIPAL": "NO",
+            "OBSERVACIONES": "TBA" if is_tba else "",
+            "ACTIVO": "SI",
+        })
+
+    options: list[dict[str, Any]] = []
+    flights: list[dict[str, Any]] = []
+    hotels: list[dict[str, Any]] = []
+    services: list[dict[str, Any]] = []
+    destinations: list[str] = []
+    option_order = 0
+
+    def add_destination(value: Any) -> None:
+        text = _clean_catalog_text(value)
+        if text and text not in destinations:
+            destinations.append(text)
+
+    def add_option(alias: str, name: str, description: str, currency: str, price: float,
+                   charge: dict[str, Any], meta: dict[str, Any]) -> None:
+        nonlocal option_order
+        option_order += 1
+        options.append({
+            "_ALIAS": alias,
+            "ORDEN": option_order,
+            "NOMBRE_OPCION": name,
+            "DESCRIPCION_CORTA": description,
+            "RECOMENDADA": "NO",
+            "ESTATUS_OPCION": "ACTIVA",
+            "MONEDA": currency or "MXN",
+            "PRECIO_VENTA_ESTIMADO": float(price or 0.0),
+            "TARIFA_SERVICIO_ESTIMADA": float(charge.get("total", 0.0) or 0.0),
+            "SELECCIONADA_CLIENTE": "NO",
+            "OBSERVACIONES_INTERNAS": _json_meta({**meta, "charge": charge}),
+            "ACTIVA": "SI",
+        })
+
+    # Flights: one 02_OPCIONES row per alternative, many 04_VUELOS rows per segment.
+    if "Vuelos" in draft.get("componentes", []):
+        flight_count = max(int(draft.get("flight_options", 1) or 1), 1)
+        charge = _option_charge_meta(captured_value, "Vuelos", True)
+        for option_idx in range(1, flight_count + 1):
+            root = f"flight_{option_idx}"
+            trip_type = captured_value(f"{root}_trip_type", "Viaje sencillo")
+            pax = max(int(captured_value(f"{root}_pax", draft.get("num_viajeros", 1)) or 1), 1)
+            basis = captured_value(f"{root}_price_basis", "Total de la reserva")
+            entered = float(captured_value(f"{root}_total_price", 0.0) or 0.0)
+            total = entered * pax if basis == "Precio por pasajero" else entered
+            currency = _clean_catalog_text(captured_value(f"{root}_total_currency", "MXN")) or "MXN"
+            alias = f"FLIGHT_{option_idx}"
+            multi_count = int(draft.get("flight_multicity_segments", {}).get(str(option_idx), 2) or 2)
+            add_option(alias, f"VUELO · Opción {option_idx}", str(trip_type), currency, total, charge, {
+                "kind": "flight", "index": option_idx, "trip_type": trip_type,
+                "pax": pax, "price_basis": basis, "entered_price": entered,
+                "multicity_segments": multi_count,
+            })
+
+            directions: list[tuple[str, str, int]] = []
+            if trip_type == "Viaje sencillo":
+                directions = [("outbound", "IDA", 1)]
+            elif trip_type == "Viaje redondo":
+                directions = [("outbound", "IDA", 1), ("return", "REGRESO", 2)]
+            else:
+                directions = [("multicity", "MULTIDESTINO", 1)]
+
+            for direction, tipo_tramo, group_no in directions:
+                prefix = f"{root}_{direction}"
+                if direction == "multicity":
+                    segment_count = multi_count
+                else:
+                    connection = captured_value(f"{prefix}_connection_type", "Vuelo directo")
+                    stops = int(captured_value(f"{prefix}_stops", 1) or 1) if connection == "Con escalas" else 0
+                    segment_count = stops + 1
+                for segment_idx in range(1, segment_count + 1):
+                    airline_iata = _clean_catalog_text(captured_value(f"{prefix}_airline_{segment_idx}_iata", ""))
+                    airline_name = _clean_catalog_text(captured_value(f"{prefix}_airline_{segment_idx}_name", ""))
+                    origin = _clean_catalog_text(captured_value(f"{prefix}_origin_{segment_idx}_iata", ""))
+                    destination = _clean_catalog_text(captured_value(f"{prefix}_destination_{segment_idx}_iata", ""))
+                    dep_date = _date_iso(captured_value(f"{prefix}_departure_date_{segment_idx}", ""))
+                    arr_date = _date_iso(captured_value(f"{prefix}_arrival_date_{segment_idx}", ""))
+                    if not any((airline_iata, airline_name, origin, destination, dep_date, arr_date)):
+                        continue
+                    add_destination(destination)
+                    flights.append({
+                        "_OPCION_ALIAS": alias,
+                        "TIPO_TRAMO": tipo_tramo,
+                        "GRUPO_TRAMO": group_no,
+                        "ORDEN_SEGMENTO": segment_idx,
+                        "AEROLINEA_IATA": airline_iata,
+                        "NUMERO_VUELO": _clean_catalog_text(captured_value(f"{prefix}_number_{segment_idx}", "")),
+                        "ORIGEN_IATA": origin,
+                        "DESTINO_IATA": destination,
+                        "FECHA_SALIDA": dep_date,
+                        "HORA_SALIDA": _time_hhmm(captured_value(f"{prefix}_departure_time_{segment_idx}", "")),
+                        "FECHA_LLEGADA": arr_date,
+                        "HORA_LLEGADA": _time_hhmm(captured_value(f"{prefix}_arrival_time_{segment_idx}", "")),
+                        "NUM_ESCALAS": max(segment_count - 1, 0),
+                        "CABINA": _clean_catalog_text(captured_value(f"{prefix}_cabin_{segment_idx}", "Económica")),
+                        "TARIFA": _clean_catalog_text(captured_value(f"{prefix}_fare_{segment_idx}", "")),
+                        "EQUIPAJE": _clean_catalog_text(captured_value(f"{prefix}_baggage_{segment_idx}", "")),
+                        "CANTIDAD_PASAJEROS": pax,
+                        "MONEDA": currency,
+                        "PRECIO_VENTA_TOTAL": total,
+                        "OBSERVACIONES_CLIENTE": _clean_catalog_text(captured_value(f"{prefix}_notes_{segment_idx}", "")),
+                        "OBSERVACIONES_INTERNAS": _json_meta({
+                            "direction": direction,
+                            "airline_name": airline_name,
+                            "airline_icao": captured_value(f"{prefix}_airline_{segment_idx}_icao", ""),
+                            "airline_logo_url": captured_value(f"{prefix}_airline_{segment_idx}_logo_url", ""),
+                            "origin_city": captured_value(f"{prefix}_origin_{segment_idx}_city", ""),
+                            "destination_city": captured_value(f"{prefix}_destination_{segment_idx}_city", ""),
+                        }),
+                        "ACTIVO": "SI",
+                    })
+
+    if "Hospedaje" in draft.get("componentes", []):
+        hotel_count = max(int(draft.get("hotel_options", 1) or 1), 1)
+        charge = _option_charge_meta(captured_value, "Hospedaje", False)
+        for idx in range(1, hotel_count + 1):
+            name = _clean_catalog_text(captured_value(f"hotel_name_{idx}", ""))
+            city = _clean_catalog_text(captured_value(f"hotel_city_{idx}", ""))
+            checkin = _date_iso(captured_value(f"hotel_checkin_{idx}", ""))
+            checkout = _date_iso(captured_value(f"hotel_checkout_{idx}", ""))
+            price = float(captured_value(f"hotel_price_{idx}", 0.0) or 0.0)
+            currency = _clean_catalog_text(captured_value(f"hotel_currency_{idx}", "MXN")) or "MXN"
+            alias = f"HOTEL_{idx}"
+            add_destination(city)
+            add_option(alias, f"HOSPEDAJE · Opción {idx}", name or city, currency, price, charge, {
+                "kind": "hotel", "index": idx,
+                "rooms": int(captured_value(f"hotel_rooms_{idx}", 1) or 1),
+                "guests": int(captured_value(f"hotel_guests_{idx}", draft.get("num_viajeros", 1)) or 1),
+                "hotel_url": captured_value(f"hotel_url_{idx}", ""),
+                "map_url": captured_value(f"hotel_map_url_{idx}", ""),
+            })
+            hotels.append({
+                "_OPCION_ALIAS": alias,
+                "HOTEL_NOMBRE": name,
+                "CIUDAD": city,
+                "CHECKIN": checkin,
+                "CHECKOUT": checkout,
+                "TIPO_HABITACION": _clean_catalog_text(captured_value(f"hotel_room_type_{idx}", "")),
+                "OCUPACION": int(captured_value(f"hotel_guests_{idx}", draft.get("num_viajeros", 1)) or 1),
+                "NUM_HABITACIONES": int(captured_value(f"hotel_rooms_{idx}", 1) or 1),
+                "PLAN_ALIMENTOS": _clean_catalog_text(captured_value(f"hotel_board_{idx}", "")),
+                "POLITICA_CANCELACION": _clean_catalog_text(captured_value(f"hotel_cancellation_{idx}", "")),
+                "IMAGEN_URL": _clean_catalog_text(captured_value(f"hotel_image_url_{idx}", "")),
+                "MONEDA": currency,
+                "PRECIO_VENTA_TOTAL": price,
+                "OBSERVACIONES_CLIENTE": _clean_catalog_text(captured_value(f"hotel_notes_{idx}", "")),
+                "OBSERVACIONES_INTERNAS": _json_meta({
+                    "hotel_url": captured_value(f"hotel_url_{idx}", ""),
+                    "map_url": captured_value(f"hotel_map_url_{idx}", ""),
+                }),
+                "ACTIVO": "SI",
+            })
+
+    service_specs = [
+        ("Seguro de viaje", "INSURANCE", "SEGURO", "insurance_price", "insurance_currency", "insurance_start", "insurance_end"),
+        ("Traslados", "TRANSFER", "TRASLADO", "transfer_price", "transfer_currency", "transfer_date", "transfer_date"),
+        ("Renta de auto", "CAR", "RENTA_AUTO", "car_price", "car_currency", "car_pickup_date", "car_return_date"),
+        ("Tours o actividades", "TOUR", "TOUR", "tour_price", "tour_currency", "tour_date", "tour_date"),
+        ("Otro servicio", "OTHER", "OTRO", "other_service_price", "other_service_currency", "", ""),
+    ]
+    service_defaults = {"Seguro de viaje": False, "Traslados": False, "Renta de auto": True,
+                        "Tours o actividades": True, "Otro servicio": False}
+    for component, alias, service_type, price_key, currency_key, start_key, end_key in service_specs:
+        if component not in draft.get("componentes", []):
+            continue
+        price = float(captured_value(price_key, 0.0) or 0.0)
+        currency = _clean_catalog_text(captured_value(currency_key, "MXN")) or "MXN"
+        charge = _option_charge_meta(captured_value, component, service_defaults[component])
+        all_keys = {
+            key: value for key, value in draft.get("capture_state", {}).items()
+            if (alias == "INSURANCE" and str(key).startswith("insurance_"))
+            or (alias == "TRANSFER" and str(key).startswith("transfer_"))
+            or (alias == "CAR" and str(key).startswith("car_"))
+            or (alias == "TOUR" and str(key).startswith("tour_"))
+            or (alias == "OTHER" and str(key).startswith("other_service_"))
+        }
+        # Live widget state wins over durable state for service keys.
+        prefixes = {"INSURANCE": "insurance_", "TRANSFER": "transfer_", "CAR": "car_", "TOUR": "tour_", "OTHER": "other_service_"}
+        prefix = prefixes[alias]
+        for key in list(st.session_state.keys()):
+            if str(key).startswith(prefix):
+                all_keys[str(key)] = st.session_state[key]
+        name_map = {
+            "INSURANCE": captured_value("insurance_plan", "Seguro de viaje"),
+            "TRANSFER": captured_value("transfer_type", "Traslado"),
+            "CAR": captured_value("car_company", "Renta de auto"),
+            "TOUR": captured_value("tour_name", "Tour o actividad"),
+            "OTHER": captured_value("other_service_name", "Otro servicio"),
+        }
+        description_map = {
+            "INSURANCE": captured_value("insurance_coverage", ""),
+            "TRANSFER": f"{captured_value('transfer_origin','')} → {captured_value('transfer_destination','')}",
+            "CAR": captured_value("car_category", ""),
+            "TOUR": captured_value("tour_includes", ""),
+            "OTHER": captured_value("other_service_description", ""),
+        }
+        notes_map = {
+            "INSURANCE": captured_value("insurance_notes", ""),
+            "TRANSFER": captured_value("transfer_notes", ""),
+            "CAR": captured_value("car_notes", ""),
+            "TOUR": captured_value("tour_notes", ""),
+            "OTHER": captured_value("other_service_notes", ""),
+        }
+        add_option(alias, component.upper(), _clean_catalog_text(name_map[alias]), currency, price, charge, {
+            "kind": "service", "component": component, "capture": all_keys,
+        })
+        services.append({
+            "_OPCION_ALIAS": alias,
+            "TIPO_SERVICIO": service_type,
+            "NOMBRE_SERVICIO": _clean_catalog_text(name_map[alias]),
+            "DESCRIPCION_CLIENTE": _clean_catalog_text(description_map[alias]),
+            "FECHA_INICIO": _date_iso(captured_value(start_key, "")) if start_key else "",
+            "FECHA_FIN": _date_iso(captured_value(end_key, "")) if end_key else "",
+            "CANTIDAD": 1,
+            "UNIDAD_COBRO": "SERVICIO",
+            "MONEDA": currency,
+            "PRECIO_VENTA_TOTAL": price,
+            "OBSERVACIONES_INTERNAS": _json_meta({"component": component, "capture": all_keys, "notes": notes_map[alias]}),
+            "ACTIVO": "SI",
+        })
+
+    quote["DESTINO_RESUMEN"] = " · ".join(destinations[:8])
+    return {
+        "cotizacion": quote,
+        "pasajeros": passengers,
+        "relaciones_pasajeros": relations,
+        "opciones": options,
+        "vuelos": flights,
+        "hospedajes": hotels,
+        "servicios": services,
+    }
+
+
+def save_quote_bundle(draft: dict[str, Any], captured_value, api: EvaApi) -> dict[str, Any]:
+    bundle = build_quote_bundle(draft, captured_value)
+    response = api.save_quote_bundle(bundle, actor_name=_clean_catalog_text(draft.get("asesor_nombre")))
+    quote = dict(response.get("cotizacion", {}))
+    folio = _clean_catalog_text(quote.get("COTIZACION_ID"))
+    if not folio:
+        raise RuntimeError("Google Sheets no devolvió el folio de la cotización.")
+    draft["folio"] = folio
+    relations = sorted(
+        list(response.get("relaciones_pasajeros") or []),
+        key=lambda row: int(row.get("ORDEN_PASAJERO") or 999),
+    )
+    draft["passenger_ids"] = [
+        _clean_catalog_text(row.get("PASAJERO_ID")) for row in relations
+        if _clean_catalog_text(row.get("PASAJERO_ID"))
+    ]
+    return response
+
+
+def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the current UI draft from a get_quote_bundle response."""
+    quote = dict(bundle.get("cotizacion") or {})
+    options = [row for row in (bundle.get("opciones") or []) if _clean_catalog_text(row.get("ACTIVA", "SI")).upper() != "NO"]
+    flights = [row for row in (bundle.get("vuelos") or []) if _clean_catalog_text(row.get("ACTIVO", "SI")).upper() != "NO"]
+    hotels = [row for row in (bundle.get("hospedajes") or []) if _clean_catalog_text(row.get("ACTIVO", "SI")).upper() != "NO"]
+    services = [row for row in (bundle.get("servicios") or []) if _clean_catalog_text(row.get("ACTIVO", "SI")).upper() != "NO"]
+    passengers = list(bundle.get("pasajeros") or [])
+    relations = sorted(list(bundle.get("relaciones_pasajeros") or []), key=lambda r: int(r.get("ORDEN_PASAJERO") or 999))
+
+    quote_meta = _parse_json_meta(quote.get("NOTAS_INTERNAS"))
+    components: list[str] = list(quote_meta.get("componentes") or [])
+    inferred = []
+    if flights: inferred.append("Vuelos")
+    if hotels: inferred.append("Hospedaje")
+    type_map = {"SEGURO": "Seguro de viaje", "TRASLADO": "Traslados", "RENTA_AUTO": "Renta de auto", "TOUR": "Tours o actividades", "OTRO": "Otro servicio"}
+    for row in services:
+        component = type_map.get(_clean_catalog_text(row.get("TIPO_SERVICIO")).upper())
+        if component and component not in inferred: inferred.append(component)
+    for component in inferred:
+        if component not in components: components.append(component)
+
+    pax_by_id = {_clean_catalog_text(p.get("PASAJERO_ID")): p for p in passengers}
+    principal = None
+    companions: list[dict[str, Any]] = []
+    for rel in relations:
+        pax = pax_by_id.get(_clean_catalog_text(rel.get("PASAJERO_ID")), {})
+        full = _clean_catalog_text(pax.get("NOMBRE_COMPLETO_DOCUMENTO")) or " ".join(
+            _clean_catalog_text(pax.get(k)) for k in ("NOMBRES", "APELLIDO_PATERNO", "APELLIDO_MATERNO") if _clean_catalog_text(pax.get(k))
+        )
+        if _clean_catalog_text(rel.get("PASAJERO_PRINCIPAL")).upper() == "SI" and principal is None:
+            principal = pax
+        else:
+            is_tba = "TBA" in (_clean_catalog_text(rel.get("OBSERVACIONES")) + " " + _clean_catalog_text(pax.get("NOTAS"))).upper() or full.upper().startswith("TBA")
+            companions.append({"name": "" if is_tba else full, "tba": is_tba})
+    if principal is None and passengers:
+        principal = passengers[0]
+    principal = principal or {}
+
+    capture: dict[str, Any] = {}
+    flight_opts = []
+    hotel_opts = []
+    service_opts = []
+    for opt in options:
+        meta = _parse_json_meta(opt.get("OBSERVACIONES_INTERNAS"))
+        kind = meta.get("kind")
+        if kind == "flight" or _clean_catalog_text(opt.get("NOMBRE_OPCION")).startswith("VUELO"):
+            flight_opts.append((opt, meta))
+        elif kind == "hotel" or _clean_catalog_text(opt.get("NOMBRE_OPCION")).startswith("HOSPEDAJE"):
+            hotel_opts.append((opt, meta))
+        elif kind == "service":
+            service_opts.append((opt, meta))
+
+    flight_opts.sort(key=lambda x: int(x[1].get("index") or x[0].get("ORDEN") or 999))
+    hotel_opts.sort(key=lambda x: int(x[1].get("index") or x[0].get("ORDEN") or 999))
+    option_id_to_findex = {}
+    multicity_counts: dict[str, int] = {}
+    for seq, (opt, meta) in enumerate(flight_opts, start=1):
+        idx = int(meta.get("index") or seq)
+        option_id_to_findex[_clean_catalog_text(opt.get("OPCION_ID"))] = idx
+        root = f"flight_{idx}"
+        trip_type = meta.get("trip_type") or _clean_catalog_text(opt.get("DESCRIPCION_CORTA")) or "Viaje sencillo"
+        capture[f"{root}_trip_type"] = trip_type
+        capture[f"{root}_pax"] = int(meta.get("pax") or quote.get("NUM_PASAJEROS") or 1)
+        capture[f"{root}_price_basis"] = meta.get("price_basis") or "Total de la reserva"
+        capture[f"{root}_total_price"] = float(meta.get("entered_price") if meta.get("entered_price") is not None else (opt.get("PRECIO_VENTA_ESTIMADO") or 0))
+        capture[f"{root}_total_currency"] = _clean_catalog_text(opt.get("MONEDA")) or "MXN"
+        multi = int(meta.get("multicity_segments") or 2)
+        multicity_counts[str(idx)] = multi
+        charge = meta.get("charge") or {}
+        if charge:
+            capture["review_charge_mode_Vuelos"] = charge.get("mode", "Estándar $250 MXN")
+            capture["review_charge_text_Vuelos"] = charge.get("concept", "Cargo por servicio")
+            capture["review_charge_amount_Vuelos"] = float(charge.get("unit_amount", 250.0) or 0.0)
+            capture["review_charge_apply_Vuelos"] = charge.get("apply", "Por cotización")
+            capture["review_charge_total_Vuelos"] = float(charge.get("total", 0.0) or 0.0)
+
+    grouped_counts: dict[tuple[int, str], int] = {}
+    for row in flights:
+        idx = option_id_to_findex.get(_clean_catalog_text(row.get("OPCION_ID")))
+        if not idx: continue
+        meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
+        direction = meta.get("direction")
+        if not direction:
+            tipo = _clean_catalog_text(row.get("TIPO_TRAMO")).upper()
+            direction = "return" if tipo == "REGRESO" else ("multicity" if tipo == "MULTIDESTINO" else "outbound")
+        grouped_counts[(idx, direction)] = grouped_counts.get((idx, direction), 0) + 1
+    for (idx, direction), count in grouped_counts.items():
+        prefix = f"flight_{idx}_{direction}"
+        if direction != "multicity":
+            capture[f"{prefix}_connection_type"] = "Con escalas" if count > 1 else "Vuelo directo"
+            if count > 1: capture[f"{prefix}_stops"] = count - 1
+        else:
+            multicity_counts[str(idx)] = count
+
+    seg_counter: dict[tuple[int, str], int] = {}
+    for row in sorted(flights, key=lambda r: (int(r.get("GRUPO_TRAMO") or 0), int(r.get("ORDEN_SEGMENTO") or 0))):
+        idx = option_id_to_findex.get(_clean_catalog_text(row.get("OPCION_ID")))
+        if not idx: continue
+        meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
+        direction = meta.get("direction") or ("return" if _clean_catalog_text(row.get("TIPO_TRAMO")).upper() == "REGRESO" else ("multicity" if _clean_catalog_text(row.get("TIPO_TRAMO")).upper() == "MULTIDESTINO" else "outbound"))
+        key = (idx, direction); seg_counter[key] = seg_counter.get(key, 0) + 1; s = seg_counter[key]
+        prefix = f"flight_{idx}_{direction}"
+        capture[f"{prefix}_airline_{s}_iata"] = _clean_catalog_text(row.get("AEROLINEA_IATA"))
+        capture[f"{prefix}_airline_{s}_name"] = meta.get("airline_name") or _clean_catalog_text(row.get("AEROLINEA_NOMBRE"))
+        capture[f"{prefix}_airline_{s}_icao"] = meta.get("airline_icao", "")
+        capture[f"{prefix}_airline_{s}_logo_url"] = meta.get("airline_logo_url", "")
+        capture[f"{prefix}_number_{s}"] = _clean_catalog_text(row.get("NUMERO_VUELO"))
+        capture[f"{prefix}_origin_{s}_iata"] = _clean_catalog_text(row.get("ORIGEN_IATA"))
+        capture[f"{prefix}_origin_{s}_city"] = meta.get("origin_city") or _clean_catalog_text(row.get("ORIGEN_CIUDAD"))
+        capture[f"{prefix}_destination_{s}_iata"] = _clean_catalog_text(row.get("DESTINO_IATA"))
+        capture[f"{prefix}_destination_{s}_city"] = meta.get("destination_city") or _clean_catalog_text(row.get("DESTINO_CIUDAD"))
+        capture[f"{prefix}_departure_date_{s}"] = _parse_date_value(row.get("FECHA_SALIDA"))
+        capture[f"{prefix}_departure_time_{s}"] = _parse_time_value(row.get("HORA_SALIDA"), time(8, 0))
+        capture[f"{prefix}_arrival_date_{s}"] = _parse_date_value(row.get("FECHA_LLEGADA"))
+        capture[f"{prefix}_arrival_time_{s}"] = _parse_time_value(row.get("HORA_LLEGADA"), time(12, 0))
+        capture[f"{prefix}_fare_{s}"] = _clean_catalog_text(row.get("TARIFA"))
+        capture[f"{prefix}_cabin_{s}"] = _clean_catalog_text(row.get("CABINA")) or "Económica"
+        capture[f"{prefix}_baggage_{s}"] = _clean_catalog_text(row.get("EQUIPAJE"))
+        capture[f"{prefix}_notes_{s}"] = _clean_catalog_text(row.get("OBSERVACIONES_CLIENTE"))
+
+    option_id_to_hindex = {}
+    for seq, (opt, meta) in enumerate(hotel_opts, start=1):
+        idx = int(meta.get("index") or seq)
+        option_id_to_hindex[_clean_catalog_text(opt.get("OPCION_ID"))] = idx
+        charge = meta.get("charge") or {}
+        if charge:
+            capture["review_charge_mode_Hospedaje"] = charge.get("mode", "Sin cargo")
+            capture["review_charge_text_Hospedaje"] = charge.get("concept", "")
+            capture["review_charge_amount_Hospedaje"] = float(charge.get("unit_amount", 0.0) or 0.0)
+            capture["review_charge_apply_Hospedaje"] = charge.get("apply", "Por cotización")
+            capture["review_charge_total_Hospedaje"] = float(charge.get("total", 0.0) or 0.0)
+    for row in hotels:
+        idx = option_id_to_hindex.get(_clean_catalog_text(row.get("OPCION_ID")))
+        if not idx: continue
+        meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
+        capture[f"hotel_name_{idx}"] = _clean_catalog_text(row.get("HOTEL_NOMBRE"))
+        capture[f"hotel_city_{idx}"] = _clean_catalog_text(row.get("CIUDAD"))
+        capture[f"hotel_room_type_{idx}"] = _clean_catalog_text(row.get("TIPO_HABITACION"))
+        capture[f"hotel_checkin_{idx}"] = _parse_date_value(row.get("CHECKIN"))
+        capture[f"hotel_checkout_{idx}"] = _parse_date_value(row.get("CHECKOUT"))
+        capture[f"hotel_rooms_{idx}"] = int(row.get("NUM_HABITACIONES") or 1)
+        capture[f"hotel_guests_{idx}"] = int(row.get("OCUPACION") or quote.get("NUM_PASAJEROS") or 1)
+        capture[f"hotel_board_{idx}"] = _clean_catalog_text(row.get("PLAN_ALIMENTOS")) or "Sin alimentos"
+        capture[f"hotel_cancellation_{idx}"] = _clean_catalog_text(row.get("POLITICA_CANCELACION"))
+        capture[f"hotel_price_{idx}"] = float(row.get("PRECIO_VENTA_TOTAL") or 0.0)
+        capture[f"hotel_currency_{idx}"] = _clean_catalog_text(row.get("MONEDA")) or "MXN"
+        capture[f"hotel_image_url_{idx}"] = _clean_catalog_text(row.get("IMAGEN_URL"))
+        capture[f"hotel_url_{idx}"] = meta.get("hotel_url", "")
+        capture[f"hotel_map_url_{idx}"] = meta.get("map_url", "")
+        capture[f"hotel_notes_{idx}"] = _clean_catalog_text(row.get("OBSERVACIONES_CLIENTE"))
+
+    for row in services:
+        meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
+        saved_capture = meta.get("capture") or {}
+        for key, value in saved_capture.items():
+            if str(key).endswith("_date") or str(key) in {"insurance_start", "insurance_end", "car_pickup_date", "car_return_date", "tour_date", "transfer_date"}:
+                capture[str(key)] = _parse_date_value(value)
+            elif str(key).endswith("_time"):
+                capture[str(key)] = _parse_time_value(value)
+            else:
+                capture[str(key)] = value
+
+    for opt, meta in service_opts:
+        component = meta.get("component")
+        charge = meta.get("charge") or {}
+        if component and charge:
+            capture[f"review_charge_mode_{component}"] = charge.get("mode", "Sin cargo")
+            capture[f"review_charge_text_{component}"] = charge.get("concept", "")
+            capture[f"review_charge_amount_{component}"] = float(charge.get("unit_amount", 0.0) or 0.0)
+            capture[f"review_charge_apply_{component}"] = charge.get("apply", "Por cotización")
+            capture[f"review_charge_total_{component}"] = float(charge.get("total", 0.0) or 0.0)
+
+    full_name = _clean_catalog_text(principal.get("NOMBRE_COMPLETO_DOCUMENTO")) or _clean_catalog_text(quote.get("CLIENTE_NOMBRE"))
+    return {
+        "modo_viajero": "Registrar nuevo viajero",
+        "viajero_existente": "",
+        "capture_state": capture,
+        "folio": _clean_catalog_text(quote.get("COTIZACION_ID")),
+        "hotel_image_cache": None,
+        "hotel_image_caches": {},
+        "hotel_options": max(len(hotel_opts), 1) if "Hospedaje" in components else 1,
+        "flight_options": max(len(flight_opts), 1) if "Vuelos" in components else 1,
+        "flight_multicity_segments": multicity_counts,
+        "airline_logo_bytes": {},
+        "companions": companions,
+        "passenger_ids": [
+            _clean_catalog_text(rel.get("PASAJERO_ID")) for rel in relations
+            if _clean_catalog_text(rel.get("PASAJERO_ID"))
+        ],
+        "nombres": _clean_catalog_text(principal.get("NOMBRES")) or full_name,
+        "apellido_paterno": _clean_catalog_text(principal.get("APELLIDO_PATERNO")),
+        "apellido_materno": _clean_catalog_text(principal.get("APELLIDO_MATERNO")),
+        "cliente_contacto": _clean_catalog_text(quote.get("CLIENTE_NOMBRE")),
+        "correo": _clean_catalog_text(quote.get("CLIENTE_EMAIL")),
+        "telefono": _clean_catalog_text(quote.get("CLIENTE_TELEFONO")),
+        "num_viajeros": max(int(quote.get("NUM_PASAJEROS") or max(len(relations), 1)), 1),
+        "componentes": components or ["Vuelos"],
+        "cargo_tipo": "Estándar",
+        "cargo_texto": "Cargo por servicio",
+        "cargo_importe": 250.0,
+        "cargo_aplicacion": "Por cotización",
+    }
 
 
 def airline_rows() -> list[dict[str, Any]]:
@@ -4245,29 +4855,32 @@ def page_new_quote() -> None:
 
         if not folio:
             st.info(
-                "Guarda la cotización para asignarle su folio permanente. "
-                "El PDF final se habilitará después de guardar."
+                "Guarda la cotización completa para asignarle su folio permanente. "
+                "Después podrás abrirla, editarla y regenerar el PDF."
             )
-
-            if st.button(
-                "Guardar cotización y asignar folio",
-                type="primary",
-                use_container_width=True,
-                key="save_quote_first_time",
-            ):
-                try:
-                    api = _eva_api_client()
-                    record = save_quote_header(draft, captured, api)
-                    folio = _clean_catalog_text(record.get("COTIZACION_ID"))
-                    draft["folio"] = folio
-                    st.success(f"Cotización guardada · {folio}")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"No pudimos guardar la cotización: {exc}")
-
+            save_label = "Guardar cotización y asignar folio"
         else:
             st.success(f"Folio de cotización: **{folio}**")
+            save_label = "Guardar cambios de la cotización"
 
+        if st.button(
+            save_label,
+            type="primary" if not folio else "secondary",
+            use_container_width=True,
+            key="save_quote_bundle_button",
+        ):
+            try:
+                persist_capture_state()
+                api = _eva_api_client()
+                result = save_quote_bundle(draft, captured, api)
+                folio = _clean_catalog_text((result.get("cotizacion") or {}).get("COTIZACION_ID"))
+                draft["folio"] = folio
+                st.success(f"Cotización completa guardada · {folio}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No pudimos guardar la cotización: {exc}")
+
+        if folio:
             try:
                 pdf_bytes = build_quote_pdf(draft, captured)
                 st.download_button(
@@ -4281,21 +4894,9 @@ def page_new_quote() -> None:
             except Exception as exc:
                 st.error(f"No pudimos generar el PDF: {exc}")
 
-            if st.button(
-                "Actualizar datos generales de la cotización",
-                use_container_width=True,
-                key="update_quote_header",
-            ):
-                try:
-                    api = _eva_api_client()
-                    save_quote_header(draft, captured, api)
-                    st.success(f"Cotización {folio} actualizada.")
-                except Exception as exc:
-                    st.error(f"No pudimos actualizar la cotización: {exc}")
-
         st.caption(
-            "El folio se genera en Google Sheets una sola vez y se conserva "
-            "aunque vuelvas a editar o regenerar el PDF."
+            "SIVE guarda el expediente completo bajo un solo folio. "
+            "La fecha inicial se calcula con el inicio real más temprano de los servicios."
         )
 
         if st.button("Regresar a revisión", use_container_width=True):
@@ -4309,17 +4910,78 @@ def page_open_quote() -> None:
         go("Inicio")
 
     st.markdown("## Abrir cotización")
-    query = st.text_input("Buscar", placeholder="Nombre del pasajero, destino o folio")
-    filters = st.radio("Estatus", ["Todas", "Borradores", "Enviadas", "Vendidas", "Recientes"], horizontal=True)
-    st.caption(f"Filtro activo: {filters}")
-    if query:
-        section_card("Resultados", "En la siguiente fase conectaremos esta búsqueda ligera con Google Sheets.")
-    else:
-        st.info("Escribe un pasajero, destino o folio para buscar.")
-    st.markdown("### Acciones disponibles")
-    c1, c2 = st.columns(2)
-    c1.button("Abrir cotización", use_container_width=True)
-    c2.button("Generar PDF", use_container_width=True, type="primary")
+    st.caption("Busca primero. SIVE solo carga el expediente completo cuando decides abrirlo.")
+
+    query = st.text_input(
+        "Buscar",
+        placeholder="Folio, viajero, destino, correo o teléfono",
+        key="open_quote_query",
+    ).strip()
+    status_label = st.radio(
+        "Estatus",
+        ["Todas", "Borradores", "Enviadas", "Vendidas"],
+        horizontal=True,
+        key="open_quote_status",
+    )
+
+    if not query:
+        st.info("Escribe un folio, viajero o destino para buscar.")
+        return
+
+    try:
+        api = _eva_api_client()
+        rows = api.list_records(
+            "01_COTIZACIONES",
+            query=query,
+            search_fields=[
+                "COTIZACION_ID", "CLIENTE_NOMBRE", "CLIENTE_EMAIL",
+                "CLIENTE_TELEFONO", "DESTINO_RESUMEN", "ASESOR_NOMBRE",
+            ],
+            limit=50,
+        )
+    except Exception as exc:
+        st.error(f"No pudimos buscar cotizaciones: {exc}")
+        return
+
+    status_map = {"Borradores": "BORRADOR", "Enviadas": "ENVIADA", "Vendidas": "VENDIDA"}
+    wanted = status_map.get(status_label)
+    if wanted:
+        rows = [r for r in rows if _clean_catalog_text(r.get("ESTATUS")).upper() == wanted]
+
+    if not rows:
+        st.warning("No encontramos cotizaciones con esos criterios.")
+        return
+
+    st.caption(f"{len(rows)} resultado{'s' if len(rows) != 1 else ''}")
+    for row in rows:
+        folio = _clean_catalog_text(row.get("COTIZACION_ID"))
+        with st.container(border=True):
+            left, right = st.columns([3, 1])
+            with left:
+                st.markdown(f"### {folio}")
+                st.markdown(f"**{_clean_catalog_text(row.get('CLIENTE_NOMBRE')) or 'Sin nombre'}**")
+                details = []
+                destination = _clean_catalog_text(row.get("DESTINO_RESUMEN"))
+                if destination: details.append(destination)
+                start_date = _date_iso(row.get("FECHA_INICIO_VIAJE"))
+                end_date = _date_iso(row.get("FECHA_FIN_VIAJE"))
+                if start_date or end_date: details.append(f"{start_date or '—'} → {end_date or '—'}")
+                status = _clean_catalog_text(row.get("ESTATUS")) or "BORRADOR"
+                details.append(status)
+                st.caption(" · ".join(details))
+            with right:
+                if st.button("Abrir", key=f"open_quote_{folio}", use_container_width=True, type="primary"):
+                    try:
+                        bundle = api.quote_bundle(folio)
+                        restored = reconstruct_draft_from_bundle(bundle)
+                        _clear_quote_widget_state()
+                        st.session_state.draft = restored
+                        st.session_state.quote_step = 4
+                        st.session_state.page = "Nueva cotización"
+                        st.success(f"Cotización {folio} cargada.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No pudimos abrir {folio}: {exc}")
 
 
 def page_passengers() -> None:
