@@ -5216,18 +5216,21 @@ def _travel_confirmation_seed(bundle: dict[str, Any], option: dict[str, Any]) ->
     }
 
 
-def _travel_default_service_fee(bundle: dict[str, Any], selected_ids: set[str]) -> float:
-    quote = dict(bundle.get("cotizacion") or {})
-    existing = float(quote.get("TARIFA_SERVICIO_VENTA") or 0.0)
-    if existing > 0:
-        return existing
-
-    total = 0.0
-    for option in bundle.get("opciones", []) or []:
-        option_id = _clean_catalog_text(option.get("OPCION_ID"))
-        if option_id in selected_ids:
-            total += float(option.get("TARIFA_SERVICIO_ESTIMADA") or 0.0)
-    return total
+def _travel_option_charge(option: dict[str, Any]) -> dict[str, Any]:
+    """Return the EVA service charge exactly as quoted for this option."""
+    meta = _parse_json_meta(option.get("OBSERVACIONES_INTERNAS"))
+    charge = dict(meta.get("charge") or {})
+    total = float(
+        option.get("TARIFA_SERVICIO_ESTIMADA")
+        or charge.get("total")
+        or 0.0
+    )
+    return {
+        "total": total,
+        "concept": _clean_catalog_text(charge.get("concept")) or "Cargo por servicio EVA",
+        "apply": _clean_catalog_text(charge.get("apply")) or "Por cotización",
+        "mode": _clean_catalog_text(charge.get("mode")) or ("Sin cargo" if total <= 0 else "Cotizado"),
+    }
 
 
 def _travel_selected_options(bundle: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5674,6 +5677,8 @@ def page_travel_document() -> None:
     selected_ids: set[str] = set()
     confirmations: list[dict[str, Any]] = []
     final_prices: dict[str, float] = {}
+    confirmed_charges: dict[str, float] = {}
+    unconfirmed_charge_options: list[str] = []
 
     previous_selected = {
         _clean_catalog_text(o.get("OPCION_ID"))
@@ -5752,6 +5757,31 @@ def page_travel_document() -> None:
                 key=f"travel_obs_{option_id}",
             )
 
+            charge = _travel_option_charge(option)
+            charge_total = float(charge["total"] or 0.0)
+
+            st.markdown("**Cargo por servicio EVA de esta opción**")
+            if charge_total > 0:
+                st.caption(
+                    f"{charge['concept']} · MXN ${charge_total:,.2f} · "
+                    f"{charge['apply'].lower()}"
+                )
+                charge_confirmed = st.checkbox(
+                    f"Confirmar cargo EVA de ${charge_total:,.2f} MXN para el Documento de viaje",
+                    value=(
+                        option_id in previous_selected
+                        and float(quote.get("TARIFA_SERVICIO_VENTA") or 0.0) > 0
+                    ),
+                    key=f"travel_charge_confirm_{option_id}",
+                )
+                if charge_confirmed:
+                    confirmed_charges[option_id] = charge_total
+                else:
+                    unconfirmed_charge_options.append(option_id)
+            else:
+                st.caption("Sin cargo por servicio EVA en la cotización.")
+                confirmed_charges[option_id] = 0.0
+
             tipo_referencia = _travel_reference_type(bundle, option)
             final_prices[option_id] = float(final_price)
 
@@ -5767,23 +5797,16 @@ def page_travel_document() -> None:
                 "observaciones_confirmacion": observations.strip(),
             })
 
-    default_fee = _travel_default_service_fee(bundle, selected_ids)
-    service_fee = st.number_input(
-        "Cargos por servicio EVA",
-        min_value=0.0,
-        value=float(default_fee),
-        step=1.0,
-        format="%.2f",
-        key=f"travel_service_fee_{folio}",
-    )
+    service_fee = sum(confirmed_charges.values())
 
     subtotal = sum(final_prices.values())
     total = subtotal + float(service_fee)
 
     st.markdown("### Total del viaje")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Servicios comprados", f"${subtotal:,.2f} MXN")
-    c2.metric("Total del viaje", f"${total:,.2f} MXN")
+    c2.metric("Cargos EVA confirmados", f"${service_fee:,.2f} MXN")
+    c3.metric("Total del viaje", f"${total:,.2f} MXN")
     st.caption(
         "El Documento de viaje mostrará el precio dentro de cada servicio. "
         "Al final solo aparecerán Cargos por servicio EVA y Total del viaje."
@@ -5792,6 +5815,12 @@ def page_travel_document() -> None:
     if not selected_ids:
         st.info("Selecciona al menos un servicio comprado para continuar.")
         return
+
+    if unconfirmed_charge_options:
+        st.warning(
+            "Confirma los cargos EVA cotizados de todos los servicios seleccionados "
+            "antes de guardar el Documento de viaje."
+        )
 
     missing_refs = [
         item["option_id"]
@@ -5808,10 +5837,20 @@ def page_travel_document() -> None:
         "Guardar compra y preparar documento de viaje",
         type="primary",
         use_container_width=True,
+        disabled=bool(unconfirmed_charge_options),
         key=f"travel_save_{folio}",
     ):
         try:
             api = _eva_api_client()
+            health = api.health()
+            backend_version = _clean_catalog_text(health.get("version"))
+            if not backend_version.startswith("2."):
+                raise RuntimeError(
+                    "El Apps Script publicado sigue siendo una versión anterior "
+                    f"({backend_version or 'sin versión'}). Vuelve a desplegar "
+                    "ConexiónWeb V2 como una nueva versión del Web App."
+                )
+
             payload = {
                 "quote_id": folio,
                 "selected_option_ids": sorted(selected_ids),
@@ -5833,7 +5872,14 @@ def page_travel_document() -> None:
                 f"Compra confirmada · {folio} · Total del viaje ${float(response.get('total') or total):,.2f} MXN"
             )
         except Exception as exc:
-            st.error(f"No pudimos guardar la compra: {exc}")
+            message = str(exc)
+            if "Acción POST no permitida: save_travel_document" in message:
+                st.error(
+                    "El Web App de Apps Script todavía está ejecutando la versión anterior. "
+                    "Guarda ConexiónWeb V2 y despliega una NUEVA VERSIÓN del deployment existente."
+                )
+            else:
+                st.error(f"No pudimos guardar la compra: {message}")
 
     pdf_bytes = st.session_state.get("travel_document_pdf")
     if pdf_bytes:
