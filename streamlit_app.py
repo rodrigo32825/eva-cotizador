@@ -5089,6 +5089,765 @@ def page_new_quote() -> None:
 
 
 
+
+# ============================================================
+# SIVE V2.0 · COMPRA CONFIRMADA + DOCUMENTO DE VIAJE
+# ============================================================
+
+def _travel_option_kind(option: dict[str, Any]) -> str:
+    meta = _parse_json_meta(option.get("OBSERVACIONES_INTERNAS"))
+    kind = _clean_catalog_text(meta.get("kind")).lower()
+    if kind in {"flight", "hotel", "service"}:
+        return kind
+
+    name = _clean_catalog_text(option.get("NOMBRE_OPCION")).upper()
+    if name.startswith("VUELO"):
+        return "flight"
+    if name.startswith("HOSPEDAJE"):
+        return "hotel"
+    return "service"
+
+
+def _travel_option_rows(bundle: dict[str, Any], option: dict[str, Any]) -> list[dict[str, Any]]:
+    option_id = _clean_catalog_text(option.get("OPCION_ID"))
+    kind = _travel_option_kind(option)
+    source = (
+        bundle.get("vuelos", []) if kind == "flight"
+        else bundle.get("hospedajes", []) if kind == "hotel"
+        else bundle.get("servicios", [])
+    )
+    return [
+        dict(row) for row in (source or [])
+        if _clean_catalog_text(row.get("OPCION_ID")) == option_id
+    ]
+
+
+def _travel_reference_type(bundle: dict[str, Any], option: dict[str, Any]) -> str:
+    kind = _travel_option_kind(option)
+    rows = _travel_option_rows(bundle, option)
+
+    if kind == "flight":
+        return "PNR"
+    if kind == "hotel":
+        return "RESERVACION"
+
+    service_type = _clean_catalog_text((rows[0] if rows else {}).get("TIPO_SERVICIO")).upper()
+    return {
+        "SEGURO": "POLIZA",
+        "TOUR": "VOUCHER",
+        "RENTA_AUTO": "RESERVACION",
+        "TRASLADO": "CONFIRMACION",
+        "EQUIPAJE": "CONFIRMACION",
+        "ASIENTO": "CONFIRMACION",
+        "ASESORIA": "CONFIRMACION",
+        "TREN": "RESERVACION",
+        "AUTOBUS": "RESERVACION",
+        "OTRO": "CONFIRMACION",
+    }.get(service_type, "CONFIRMACION")
+
+
+def _travel_option_summary(bundle: dict[str, Any], option: dict[str, Any]) -> str:
+    kind = _travel_option_kind(option)
+    rows = _travel_option_rows(bundle, option)
+
+    if kind == "flight" and rows:
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                _date_iso(r.get("FECHA_SALIDA")),
+                _time_hhmm(r.get("HORA_SALIDA")),
+                int(r.get("ORDEN_SEGMENTO") or 999),
+            ),
+        )
+        origin = _clean_catalog_text(rows[0].get("ORIGEN_IATA")) or "—"
+        destination = _clean_catalog_text(rows[-1].get("DESTINO_IATA")) or "—"
+        airlines = []
+        for row in rows:
+            name = _clean_catalog_text(row.get("AEROLINEA_NOMBRE")) or _clean_catalog_text(row.get("AEROLINEA_IATA"))
+            if name and name not in airlines:
+                airlines.append(name)
+        airline_text = " / ".join(airlines[:2])
+        return f"{airline_text} · {origin} → {destination}".strip(" ·")
+
+    if kind == "hotel" and rows:
+        row = rows[0]
+        hotel = _clean_catalog_text(row.get("HOTEL_NOMBRE")) or "Hospedaje"
+        city = _clean_catalog_text(row.get("CIUDAD"))
+        return f"{hotel}{' · ' + city if city else ''}"
+
+    if rows:
+        row = rows[0]
+        name = _clean_catalog_text(row.get("NOMBRE_SERVICIO")) or _clean_catalog_text(option.get("NOMBRE_OPCION"))
+        return name or "Servicio"
+
+    return _clean_catalog_text(option.get("DESCRIPCION_CORTA")) or _clean_catalog_text(option.get("NOMBRE_OPCION")) or "Opción"
+
+
+def _travel_confirmation_seed(bundle: dict[str, Any], option: dict[str, Any]) -> dict[str, Any]:
+    rows = _travel_option_rows(bundle, option)
+    row = rows[0] if rows else {}
+    kind = _travel_option_kind(option)
+
+    quoted = float(
+        option.get("PRECIO_VENTA_ESTIMADO")
+        or row.get("PRECIO_COTIZADO")
+        or row.get("PRECIO_VENTA_TOTAL")
+        or 0.0
+    )
+
+    final_price = float(row.get("PRECIO_FINAL") or quoted or 0.0)
+    reference = _clean_catalog_text(row.get("REFERENCIA_CONFIRMACION"))
+    if not reference:
+        if kind == "flight":
+            reference = _clean_catalog_text(row.get("LOCALIZADOR"))
+        else:
+            reference = _clean_catalog_text(row.get("NUMERO_CONFIRMACION"))
+
+    confirmation_date = _parse_date_value(row.get("FECHA_CONFIRMACION")) or date.today()
+
+    return {
+        "quoted": quoted,
+        "final": final_price,
+        "reference": reference,
+        "observations": _clean_catalog_text(row.get("OBSERVACIONES_CONFIRMACION")),
+        "confirmation_date": confirmation_date,
+        "estado": _clean_catalog_text(row.get("ESTADO_CONFIRMACION")) or "CONFIRMADO",
+        "tipo_referencia": _clean_catalog_text(row.get("TIPO_REFERENCIA")) or _travel_reference_type(bundle, option),
+    }
+
+
+def _travel_default_service_fee(bundle: dict[str, Any], selected_ids: set[str]) -> float:
+    quote = dict(bundle.get("cotizacion") or {})
+    existing = float(quote.get("TARIFA_SERVICIO_VENTA") or 0.0)
+    if existing > 0:
+        return existing
+
+    total = 0.0
+    for option in bundle.get("opciones", []) or []:
+        option_id = _clean_catalog_text(option.get("OPCION_ID"))
+        if option_id in selected_ids:
+            total += float(option.get("TARIFA_SERVICIO_ESTIMADA") or 0.0)
+    return total
+
+
+def _travel_selected_options(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(option)
+        for option in (bundle.get("opciones") or [])
+        if _clean_catalog_text(option.get("ACTIVA", "SI")).upper() != "NO"
+        and _clean_catalog_text(option.get("SELECCIONADA_CLIENTE")).upper() == "SI"
+    ]
+
+
+def build_travel_document_pdf(bundle: dict[str, Any]) -> bytes:
+    """Generate the post-purchase Documento de viaje from persisted V2 data."""
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError(
+            "La librería reportlab no está instalada. Agrega reportlab a requirements.txt."
+        )
+
+    quote = dict(bundle.get("cotizacion") or {})
+    selected_options = _travel_selected_options(bundle)
+    if not selected_options:
+        raise RuntimeError("No hay servicios comprados seleccionados.")
+
+    teal = colors.HexColor("#2F9FA3")
+    soft = colors.HexColor("#F4F8F8")
+    border = colors.HexColor("#D9E2E2")
+    dark = colors.HexColor("#202426")
+    text = colors.HexColor("#2F3437")
+    muted = colors.HexColor("#737B80")
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="TDTitle", fontName="Helvetica-Bold", fontSize=18, leading=21, textColor=dark
+    ))
+    styles.add(ParagraphStyle(
+        name="TDSubtitle", fontName="Helvetica", fontSize=8.5, leading=11, textColor=muted
+    ))
+    styles.add(ParagraphStyle(
+        name="TDSection", fontName="Helvetica-Bold", fontSize=11.5, leading=14, textColor=dark
+    ))
+    styles.add(ParagraphStyle(
+        name="TDBody", fontName="Helvetica", fontSize=8.5, leading=11, textColor=text
+    ))
+    styles.add(ParagraphStyle(
+        name="TDSmall", fontName="Helvetica", fontSize=7.2, leading=9, textColor=muted
+    ))
+    styles.add(ParagraphStyle(
+        name="TDRefLabel", fontName="Helvetica-Bold", fontSize=7, leading=8, textColor=teal
+    ))
+    styles.add(ParagraphStyle(
+        name="TDRef", fontName="Courier-Bold", fontSize=15, leading=17, textColor=dark
+    ))
+    styles.add(ParagraphStyle(
+        name="TDPrice", fontName="Courier-Bold", fontSize=8.5, leading=10, textColor=muted, alignment=TA_RIGHT
+    ))
+    styles.add(ParagraphStyle(
+        name="TDTotal", fontName="Courier-Bold", fontSize=16, leading=19, textColor=dark, alignment=TA_RIGHT
+    ))
+
+    def P(value: Any, style: str = "TDBody"):
+        return Paragraph(
+            str(value if value not in (None, "") else "—"),
+            styles[style],
+        )
+
+    def money(value: Any, currency: str = "MXN") -> str:
+        return f"{currency} {float(value or 0):,.2f}"
+
+    def fmt_date(value: Any) -> str:
+        parsed = _parse_date_value(value)
+        if not parsed:
+            return "—"
+        months = [
+            "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+        ]
+        return f"{parsed.day} {months[parsed.month]} {parsed.year}"
+
+    def image_from_bytes(data: bytes | None, max_w: float, max_h: float):
+        if not data:
+            return None
+        try:
+            bio = BytesIO(data)
+            ir = ImageReader(bio)
+            width, height = ir.getSize()
+            scale = min(max_w / width, max_h / height)
+            bio.seek(0)
+            return RLImage(bio, width=width * scale, height=height * scale)
+        except Exception:
+            return None
+
+    def image_from_url(url: str, max_w: float, max_h: float):
+        if not url:
+            return None
+        data, _ = _fetch_image_bytes(url)
+        return image_from_bytes(data, max_w, max_h)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=14 * mm,
+        bottomMargin=17 * mm,
+    )
+
+    story = []
+
+    eva_logo = None
+    eva_path = _eva_logo_path()
+    if eva_path:
+        try:
+            img = RLImage(str(eva_path))
+            scale = min((47 * mm) / img.imageWidth, (18 * mm) / img.imageHeight)
+            img.drawWidth = img.imageWidth * scale
+            img.drawHeight = img.imageHeight * scale
+            eva_logo = img
+        except Exception:
+            eva_logo = None
+
+    folio = _clean_catalog_text(quote.get("COTIZACION_ID"))
+    title_block = [
+        P("DOCUMENTO DE VIAJE", "TDTitle"),
+        P(folio, "TDSubtitle"),
+    ]
+    header_table = Table(
+        [[eva_logo or "", title_block]],
+        colWidths=[55 * mm, 120 * mm],
+    )
+    header_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.7, border),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 5 * mm))
+
+    traveler = _clean_catalog_text(quote.get("CLIENTE_NOMBRE")) or "Viajero"
+    trip_start = fmt_date(quote.get("FECHA_INICIO_VIAJE"))
+    trip_end = fmt_date(quote.get("FECHA_FIN_VIAJE"))
+    info = Table(
+        [
+            [P("VIAJERO", "TDSmall"), P("FECHAS DEL VIAJE", "TDSmall")],
+            [P(traveler, "TDSection"), P(f"{trip_start} — {trip_end}", "TDBody")],
+        ],
+        colWidths=[90 * mm, 85 * mm],
+    )
+    info.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), soft),
+        ("BOX", (0, 0), (-1, -1), 0.6, border),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, border),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(info)
+    story.append(Spacer(1, 6 * mm))
+
+    # Flights first
+    flight_options = [o for o in selected_options if _travel_option_kind(o) == "flight"]
+    hotel_options = [o for o in selected_options if _travel_option_kind(o) == "hotel"]
+    service_options = [o for o in selected_options if _travel_option_kind(o) == "service"]
+
+    if flight_options:
+        story.append(P("VUELOS", "TDSection"))
+        story.append(Spacer(1, 2 * mm))
+
+    for option in flight_options:
+        rows = sorted(
+            _travel_option_rows(bundle, option),
+            key=lambda r: (
+                _date_iso(r.get("FECHA_SALIDA")),
+                _time_hhmm(r.get("HORA_SALIDA")),
+                int(r.get("ORDEN_SEGMENTO") or 999),
+            ),
+        )
+        if not rows:
+            continue
+        first = rows[0]
+        currency = _clean_catalog_text(first.get("MONEDA")) or _clean_catalog_text(option.get("MONEDA")) or "MXN"
+        final_price = float(first.get("PRECIO_FINAL") or option.get("PRECIO_VENTA_ESTIMADO") or 0.0)
+        reference = _clean_catalog_text(first.get("REFERENCIA_CONFIRMACION")) or _clean_catalog_text(first.get("LOCALIZADOR"))
+        observations = _clean_catalog_text(first.get("OBSERVACIONES_CONFIRMACION"))
+
+        logo_bytes, _ = _local_airline_logo_bytes(
+            iata=_clean_catalog_text(first.get("AEROLINEA_IATA")),
+            icao="",
+        )
+        logo = image_from_bytes(logo_bytes, 28 * mm, 13 * mm)
+
+        top = Table(
+            [[
+                logo or P(_clean_catalog_text(first.get("AEROLINEA_NOMBRE")) or "Vuelo", "TDSection"),
+                [
+                    P("REFERENCIA DE CONFIRMACIÓN", "TDRefLabel"),
+                    P(reference or "—", "TDRef"),
+                ],
+            ]],
+            colWidths=[92 * mm, 83 * mm],
+        )
+        top.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+            ("BACKGROUND", (0, 0), (-1, -1), soft),
+            ("BOX", (0, 0), (-1, -1), 0.7, border),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+
+        segment_rows = [[
+            P("VUELO", "TDSmall"),
+            P("RUTA", "TDSmall"),
+            P("SALIDA", "TDSmall"),
+            P("LLEGADA", "TDSmall"),
+            P("EQUIPAJE", "TDSmall"),
+        ]]
+        for row in rows:
+            airline_code = _clean_catalog_text(row.get("AEROLINEA_IATA"))
+            flight_no = _clean_catalog_text(row.get("NUMERO_VUELO"))
+            segment_rows.append([
+                P(f"{airline_code} {flight_no}".strip(), "TDBody"),
+                P(f"{_clean_catalog_text(row.get('ORIGEN_IATA'))} → {_clean_catalog_text(row.get('DESTINO_IATA'))}", "TDBody"),
+                P(f"{fmt_date(row.get('FECHA_SALIDA'))}<br/>{_time_hhmm(row.get('HORA_SALIDA')) or '—'}", "TDBody"),
+                P(f"{fmt_date(row.get('FECHA_LLEGADA'))}<br/>{_time_hhmm(row.get('HORA_LLEGADA')) or '—'}", "TDBody"),
+                P(_clean_catalog_text(row.get("EQUIPAJE")) or "—", "TDBody"),
+            ])
+
+        seg_table = Table(
+            segment_rows,
+            colWidths=[23 * mm, 28 * mm, 45 * mm, 45 * mm, 34 * mm],
+            repeatRows=1,
+        )
+        seg_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.white),
+            ("BOX", (0, 0), (-1, -1), 0.7, border),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, border),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+
+        ticket_numbers = []
+        for row in rows:
+            ticket = _clean_catalog_text(row.get("NUMERO_BOLETO"))
+            if ticket and ticket not in ticket_numbers:
+                ticket_numbers.append(ticket)
+
+        foot = []
+        if ticket_numbers:
+            foot.append(P("Boleto(s): " + ", ".join(ticket_numbers), "TDSmall"))
+        if observations:
+            foot.append(P(observations, "TDSmall"))
+        foot.append(P(f"Importe final · {money(final_price, currency)}", "TDPrice"))
+
+        story.append(KeepTogether([top, seg_table, Spacer(1, 1.5 * mm)] + foot))
+        story.append(Spacer(1, 5 * mm))
+
+    if hotel_options:
+        story.append(P("HOSPEDAJE", "TDSection"))
+        story.append(Spacer(1, 2 * mm))
+
+    for option in hotel_options:
+        rows = _travel_option_rows(bundle, option)
+        if not rows:
+            continue
+        row = rows[0]
+        hotel = _clean_catalog_text(row.get("HOTEL_NOMBRE")) or "Hospedaje"
+        city = _clean_catalog_text(row.get("CIUDAD"))
+        currency = _clean_catalog_text(row.get("MONEDA")) or _clean_catalog_text(option.get("MONEDA")) or "MXN"
+        final_price = float(row.get("PRECIO_FINAL") or option.get("PRECIO_VENTA_ESTIMADO") or 0.0)
+        reference = _clean_catalog_text(row.get("REFERENCIA_CONFIRMACION")) or _clean_catalog_text(row.get("NUMERO_CONFIRMACION"))
+        observations = _clean_catalog_text(row.get("OBSERVACIONES_CONFIRMACION"))
+
+        hotel_img = image_from_url(_clean_catalog_text(row.get("IMAGEN_URL")), 52 * mm, 34 * mm)
+        detail = [
+            P(hotel, "TDSection"),
+            P(city, "TDSubtitle"),
+            Spacer(1, 1 * mm),
+            P(f"<b>Check-in:</b> {fmt_date(row.get('CHECKIN'))}", "TDBody"),
+            P(f"<b>Check-out:</b> {fmt_date(row.get('CHECKOUT'))}", "TDBody"),
+            P(f"<b>Habitación:</b> {_clean_catalog_text(row.get('TIPO_HABITACION')) or '—'}", "TDBody"),
+            P(f"<b>Plan:</b> {_clean_catalog_text(row.get('PLAN_ALIMENTOS')) or '—'}", "TDBody"),
+        ]
+        ref_block = [
+            P("REFERENCIA DE CONFIRMACIÓN", "TDRefLabel"),
+            P(reference or "—", "TDRef"),
+        ]
+
+        hotel_table = Table(
+            [[hotel_img or "", detail, ref_block]],
+            colWidths=[55 * mm, 72 * mm, 48 * mm],
+        )
+        hotel_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.7, border),
+            ("BACKGROUND", (0, 0), (-1, -1), soft),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(hotel_table)
+        if observations:
+            story.append(P(observations, "TDSmall"))
+        story.append(P(f"Importe final · {money(final_price, currency)}", "TDPrice"))
+        story.append(Spacer(1, 5 * mm))
+
+    if service_options:
+        story.append(P("OTROS SERVICIOS", "TDSection"))
+        story.append(Spacer(1, 2 * mm))
+
+    for option in service_options:
+        rows = _travel_option_rows(bundle, option)
+        if not rows:
+            continue
+        row = rows[0]
+        name = _clean_catalog_text(row.get("NOMBRE_SERVICIO")) or _clean_catalog_text(option.get("NOMBRE_OPCION")) or "Servicio"
+        description = _clean_catalog_text(row.get("DESCRIPCION_CLIENTE"))
+        currency = _clean_catalog_text(row.get("MONEDA")) or _clean_catalog_text(option.get("MONEDA")) or "MXN"
+        final_price = float(row.get("PRECIO_FINAL") or option.get("PRECIO_VENTA_ESTIMADO") or 0.0)
+        reference = _clean_catalog_text(row.get("REFERENCIA_CONFIRMACION")) or _clean_catalog_text(row.get("NUMERO_CONFIRMACION"))
+        observations = _clean_catalog_text(row.get("OBSERVACIONES_CONFIRMACION"))
+
+        details = [P(name, "TDSection")]
+        if description:
+            details.append(P(description, "TDBody"))
+        if row.get("FECHA_INICIO"):
+            details.append(P(
+                f"{fmt_date(row.get('FECHA_INICIO'))}"
+                + (f" — {fmt_date(row.get('FECHA_FIN'))}" if row.get("FECHA_FIN") else ""),
+                "TDSmall",
+            ))
+
+        service_table = Table(
+            [[
+                details,
+                [
+                    P("REFERENCIA DE CONFIRMACIÓN", "TDRefLabel"),
+                    P(reference or "—", "TDRef"),
+                ],
+            ]],
+            colWidths=[115 * mm, 60 * mm],
+        )
+        service_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.7, border),
+            ("BACKGROUND", (0, 0), (-1, -1), soft),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(service_table)
+        if observations:
+            story.append(P(observations, "TDSmall"))
+        story.append(P(f"Importe final · {money(final_price, currency)}", "TDPrice"))
+        story.append(Spacer(1, 5 * mm))
+
+    service_fee = float(quote.get("TARIFA_SERVICIO_VENTA") or 0.0)
+    total = float(quote.get("TOTAL_VENTA") or 0.0)
+    currency = _clean_catalog_text(quote.get("MONEDA")) or "MXN"
+
+    total_table = Table(
+        [
+            [P("CARGOS POR SERVICIO EVA", "TDBody"), P(money(service_fee, currency), "TDPrice")],
+            [P("TOTAL DEL VIAJE", "TDSection"), P(money(total, currency), "TDTotal")],
+        ],
+        colWidths=[85 * mm, 90 * mm],
+    )
+    total_table.setStyle(TableStyle([
+        ("LINEABOVE", (0, 0), (-1, 0), 0.7, border),
+        ("LINEABOVE", (0, 1), (-1, 1), 1.2, dark),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(Spacer(1, 2 * mm))
+    story.append(total_table)
+
+    class TravelFooterCanvas(pdfcanvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            pdfcanvas.Canvas.__init__(self, *args, **kwargs)
+            self._saved_page_states = []
+
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total_pages = len(self._saved_page_states)
+            for state in self._saved_page_states:
+                self.__dict__.update(state)
+                self.setFont("Helvetica", 6.8)
+                self.setFillColor(muted)
+                self.drawString(15 * mm, 8 * mm, f"Proyecto EVA · {folio}")
+                self.drawRightString(A4[0] - 15 * mm, 8 * mm, f"{self._pageNumber}/{total_pages}")
+                pdfcanvas.Canvas.showPage(self)
+            pdfcanvas.Canvas.save(self)
+
+    doc.build(story, canvasmaker=TravelFooterCanvas)
+    return buffer.getvalue()
+
+
+def page_travel_document() -> None:
+    if st.button("← Volver a cotizaciones", key="back_travel_document"):
+        st.session_state.page = "Abrir cotización"
+        st.rerun()
+
+    bundle = st.session_state.get("travel_bundle")
+    if not bundle:
+        st.warning("Primero abre una cotización desde el módulo de cotizaciones.")
+        return
+
+    quote = dict(bundle.get("cotizacion") or {})
+    folio = _clean_catalog_text(quote.get("COTIZACION_ID"))
+    if not folio:
+        st.error("El expediente no tiene folio.")
+        return
+
+    st.markdown("## Preparar documento de viaje")
+    st.caption(
+        f"{folio} · Selecciona los servicios realmente comprados. "
+        "La cotización original se conserva bajo el mismo folio."
+    )
+
+    options = [
+        dict(option)
+        for option in (bundle.get("opciones") or [])
+        if _clean_catalog_text(option.get("ACTIVA", "SI")).upper() != "NO"
+    ]
+
+    if not options:
+        st.warning("Esta cotización no tiene opciones disponibles.")
+        return
+
+    selected_ids: set[str] = set()
+    confirmations: list[dict[str, Any]] = []
+    final_prices: dict[str, float] = {}
+
+    previous_selected = {
+        _clean_catalog_text(o.get("OPCION_ID"))
+        for o in options
+        if _clean_catalog_text(o.get("SELECCIONADA_CLIENTE")).upper() == "SI"
+    }
+
+    st.markdown("### Servicios comprados")
+    st.caption(
+        "Puedes seleccionar más de un vuelo, más de un hotel y varios servicios complementarios."
+    )
+
+    for option in options:
+        option_id = _clean_catalog_text(option.get("OPCION_ID"))
+        if not option_id:
+            continue
+
+        kind = _travel_option_kind(option)
+        summary = _travel_option_summary(bundle, option)
+        seed = _travel_confirmation_seed(bundle, option)
+        quoted_currency = _clean_catalog_text(option.get("MONEDA")) or "MXN"
+
+        with st.container(border=True):
+            selected = st.checkbox(
+                f"{_clean_catalog_text(option.get('NOMBRE_OPCION')) or 'Opción'} · {summary}",
+                value=option_id in previous_selected,
+                key=f"travel_selected_{option_id}",
+            )
+
+            st.caption(
+                f"Precio cotizado · {quoted_currency} {seed['quoted']:,.2f}"
+            )
+
+            if not selected:
+                continue
+
+            selected_ids.add(option_id)
+
+            c1, c2 = st.columns([1.2, 1])
+            with c1:
+                reference = st.text_input(
+                    "Referencia de confirmación",
+                    value=seed["reference"],
+                    placeholder="Localizador, reservación, póliza, voucher, etc.",
+                    key=f"travel_ref_{option_id}",
+                )
+            with c2:
+                final_price = st.number_input(
+                    "Precio final",
+                    min_value=0.0,
+                    value=float(seed["final"]),
+                    step=1.0,
+                    format="%.2f",
+                    key=f"travel_price_{option_id}",
+                )
+
+            c3, c4 = st.columns([1, 1])
+            with c3:
+                confirmation_date = st.date_input(
+                    "Fecha de confirmación",
+                    value=seed["confirmation_date"],
+                    key=f"travel_date_{option_id}",
+                )
+            with c4:
+                st.text_input(
+                    "Estado",
+                    value="CONFIRMADO",
+                    disabled=True,
+                    key=f"travel_status_{option_id}",
+                )
+
+            observations = st.text_area(
+                "Observaciones de confirmación",
+                value=seed["observations"],
+                placeholder="Opcional",
+                key=f"travel_obs_{option_id}",
+            )
+
+            tipo_referencia = _travel_reference_type(bundle, option)
+            final_prices[option_id] = float(final_price)
+
+            confirmations.append({
+                "option_id": option_id,
+                "kind": kind,
+                "estado_confirmacion": "CONFIRMADO",
+                "referencia_confirmacion": reference.strip(),
+                "tipo_referencia": tipo_referencia,
+                "precio_cotizado": float(seed["quoted"]),
+                "precio_final": float(final_price),
+                "fecha_confirmacion": confirmation_date.isoformat(),
+                "observaciones_confirmacion": observations.strip(),
+            })
+
+    default_fee = _travel_default_service_fee(bundle, selected_ids)
+    service_fee = st.number_input(
+        "Cargos por servicio EVA",
+        min_value=0.0,
+        value=float(default_fee),
+        step=1.0,
+        format="%.2f",
+        key=f"travel_service_fee_{folio}",
+    )
+
+    subtotal = sum(final_prices.values())
+    total = subtotal + float(service_fee)
+
+    st.markdown("### Total del viaje")
+    c1, c2 = st.columns(2)
+    c1.metric("Servicios comprados", f"${subtotal:,.2f} MXN")
+    c2.metric("Total del viaje", f"${total:,.2f} MXN")
+    st.caption(
+        "El Documento de viaje mostrará el precio dentro de cada servicio. "
+        "Al final solo aparecerán Cargos por servicio EVA y Total del viaje."
+    )
+
+    if not selected_ids:
+        st.info("Selecciona al menos un servicio comprado para continuar.")
+        return
+
+    missing_refs = [
+        item["option_id"]
+        for item in confirmations
+        if not _clean_catalog_text(item.get("referencia_confirmacion"))
+    ]
+    if missing_refs:
+        st.warning(
+            "Hay servicios seleccionados sin referencia de confirmación. "
+            "Puedes guardarlos así si aún no te la entrega el proveedor."
+        )
+
+    if st.button(
+        "Guardar compra y preparar documento de viaje",
+        type="primary",
+        use_container_width=True,
+        key=f"travel_save_{folio}",
+    ):
+        try:
+            api = _eva_api_client()
+            payload = {
+                "quote_id": folio,
+                "selected_option_ids": sorted(selected_ids),
+                "confirmations": confirmations,
+                "service_fee": float(service_fee),
+                "confirmation_date": date.today().isoformat(),
+            }
+            response = api.save_travel_document(
+                payload,
+                actor_name=_clean_catalog_text(quote.get("ASESOR_NOMBRE")),
+            )
+            updated_bundle = dict(response.get("bundle") or {})
+            if not updated_bundle:
+                raise RuntimeError("Google Sheets no devolvió el expediente actualizado.")
+
+            st.session_state["travel_bundle"] = updated_bundle
+            st.session_state["travel_document_pdf"] = build_travel_document_pdf(updated_bundle)
+            st.success(
+                f"Compra confirmada · {folio} · Total del viaje ${float(response.get('total') or total):,.2f} MXN"
+            )
+        except Exception as exc:
+            st.error(f"No pudimos guardar la compra: {exc}")
+
+    pdf_bytes = st.session_state.get("travel_document_pdf")
+    if pdf_bytes:
+        st.download_button(
+            "Generar / descargar Documento de viaje",
+            data=pdf_bytes,
+            file_name=f"Documento_de_viaje_{folio}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+            key=f"travel_pdf_{folio}",
+        )
+
+
 def page_open_quote() -> None:
     if st.button("← Volver al inicio", key="back_open_quote"):
         go("Inicio")
@@ -5145,7 +5904,7 @@ def page_open_quote() -> None:
     for row in rows:
         folio = _clean_catalog_text(row.get("COTIZACION_ID"))
         with st.container(border=True):
-            left, right = st.columns([3, 1])
+            left, right = st.columns([2.65, 1.35])
             with left:
                 st.markdown(f"### {folio}")
                 st.markdown(f"**{_clean_catalog_text(row.get('CLIENTE_NOMBRE')) or 'Sin nombre'}**")
@@ -5167,7 +5926,7 @@ def page_open_quote() -> None:
                 details.append(display_status)
                 st.caption(" · ".join(details))
             with right:
-                if st.button("Abrir", key=f"open_quote_{folio}", use_container_width=True, type="primary"):
+                if st.button("Abrir cotización", key=f"open_quote_{folio}", use_container_width=True):
                     try:
                         bundle = api.quote_bundle(folio)
 
@@ -5207,6 +5966,21 @@ def page_open_quote() -> None:
                     except Exception as exc:
                         st.error(f"No pudimos abrir {folio}: {exc}")
 
+                if st.button(
+                    "Documento de viaje",
+                    key=f"travel_quote_{folio}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    try:
+                        bundle = api.quote_bundle(folio)
+                        st.session_state["travel_bundle"] = bundle
+                        st.session_state["travel_document_pdf"] = None
+                        st.session_state["page"] = "Documento de viaje"
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No pudimos preparar {folio}: {exc}")
+
 
 def page_passengers() -> None:
     if st.button("← Volver al inicio", key="back_travelers"):
@@ -5234,6 +6008,8 @@ def main() -> None:
         page_new_quote()
     elif page == "Abrir cotización":
         page_open_quote()
+    elif page == "Documento de viaje":
+        page_travel_document()
     elif page == "Viajeros":
         page_passengers()
     elif page == "Ventas":
