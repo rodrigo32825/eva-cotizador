@@ -177,6 +177,45 @@ def init_state() -> None:
 init_state()
 
 
+def _fresh_quote_draft() -> dict[str, Any]:
+    """Return a brand-new quote draft, independent from any opened quote."""
+    return {
+        "modo_viajero": "Buscar viajero existente",
+        "viajero_existente": "",
+        "capture_state": {},
+        "folio": "",
+        "hotel_image_cache": None,
+        "hotel_image_caches": {},
+        "hotel_options": 1,
+        "flight_options": 1,
+        "flight_multicity_segments": {},
+        "airline_logo_bytes": {},
+        "companions": [],
+        "passenger_ids": [],
+        "nombres": "",
+        "apellido_paterno": "",
+        "apellido_materno": "",
+        "cliente_contacto": "",
+        "correo": "",
+        "telefono": "",
+        "num_viajeros": 1,
+        "componentes": ["Vuelos"],
+        "cargo_tipo": "Estándar",
+        "cargo_texto": "Cargo por servicio",
+        "cargo_importe": 250.0,
+        "cargo_aplicacion": "Por cotización",
+    }
+
+
+def start_new_quote() -> None:
+    """Start a clean quote instead of reusing the last opened draft."""
+    _clear_quote_widget_state()
+    st.session_state["draft"] = _fresh_quote_draft()
+    st.session_state["quote_step"] = 1
+    st.session_state["page"] = "Nueva cotización"
+    st.rerun()
+
+
 def go(page: str) -> None:
     st.session_state.page = page
     st.rerun()
@@ -235,6 +274,8 @@ def top_navigation() -> None:
     selected = st.radio("Navegación", labels, index=index_map.get(current, 0), horizontal=True, label_visibility="collapsed", key="main_navigation")
     mapped = reverse_map[selected]
     if mapped != current:
+        if mapped == "Nueva cotización":
+            start_new_quote()
         st.session_state.page = mapped
         st.rerun()
 
@@ -3003,7 +3044,7 @@ def page_home() -> None:
             type="primary",
             key="home_new_quote",
         ):
-            go("Nueva cotización")
+            start_new_quote()
 
     col3, col4 = st.columns(2)
 
