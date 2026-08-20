@@ -1033,7 +1033,7 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
             "FECHA_INICIO": _date_iso(captured_value(start_key, "")) if start_key else "",
             "FECHA_FIN": _date_iso(captured_value(end_key, "")) if end_key else "",
             "CANTIDAD": 1,
-            "UNIDAD_COBRO": "SERVICIO",
+            "UNIDAD_COBRO": "POR_SERVICIO",
             "MONEDA": currency,
             "PRECIO_VENTA_TOTAL": price,
             "OBSERVACIONES_INTERNAS": _json_meta({"component": component, "capture": all_keys, "notes": notes_map[alias]}),
