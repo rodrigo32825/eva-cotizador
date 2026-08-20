@@ -151,3 +151,17 @@ class EvaApi:
             bundle=bundle,
             actor_name=actor_name,
         )
+
+
+    def save_travel_document(
+        self,
+        data: dict[str, Any],
+        *,
+        actor_name: str = "",
+    ) -> dict[str, Any]:
+        """Persist purchased options and standardized confirmation data in one call."""
+        return self._post(
+            "save_travel_document",
+            data=data,
+            actor_name=actor_name,
+        )
