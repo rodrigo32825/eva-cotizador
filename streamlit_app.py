@@ -731,7 +731,7 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
         "CLIENTE_TELEFONO": _clean_catalog_text(draft.get("telefono")),
         "NUM_PASAJEROS": max(int(draft.get("num_viajeros", 1) or 1), 1),
         "MONEDA": "MXN",
-        "ESTATUS": "COTIZADA",
+        "ESTATUS": "BORRADOR",
         "NOTAS_INTERNAS": _json_meta({
             "componentes": list(draft.get("componentes", [])),
             "modo_viajero": draft.get("modo_viajero", "Registrar nuevo viajero"),
@@ -1254,6 +1254,46 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 capture[str(key)] = _parse_time_value(value)
             else:
                 capture[str(key)] = value
+
+        # Recuperación tolerante para filas históricas incompletas.
+        service_type = _clean_catalog_text(row.get("TIPO_SERVICIO")).upper()
+        service_price = float(row.get("PRECIO_VENTA_TOTAL") or 0.0)
+        service_currency = _clean_catalog_text(row.get("MONEDA")) or "MXN"
+        service_name = _clean_catalog_text(row.get("NOMBRE_SERVICIO"))
+        service_description = _clean_catalog_text(row.get("DESCRIPCION_CLIENTE"))
+        service_start = _parse_date_value(row.get("FECHA_INICIO"))
+        service_end = _parse_date_value(row.get("FECHA_FIN"))
+
+        if service_type == "SEGURO":
+            capture.setdefault("insurance_plan", service_name or "Seguro de viaje")
+            capture.setdefault("insurance_coverage", service_description)
+            capture.setdefault("insurance_start", service_start)
+            capture.setdefault("insurance_end", service_end)
+            capture.setdefault("insurance_price", service_price)
+            capture.setdefault("insurance_currency", service_currency)
+        elif service_type == "TRASLADO":
+            capture.setdefault("transfer_type", service_name or "Traslado")
+            capture.setdefault("transfer_date", service_start)
+            capture.setdefault("transfer_price", service_price)
+            capture.setdefault("transfer_currency", service_currency)
+        elif service_type == "RENTA_AUTO":
+            capture.setdefault("car_company", service_name or "Renta de auto")
+            capture.setdefault("car_category", service_description)
+            capture.setdefault("car_pickup_date", service_start)
+            capture.setdefault("car_return_date", service_end)
+            capture.setdefault("car_price", service_price)
+            capture.setdefault("car_currency", service_currency)
+        elif service_type == "TOUR":
+            capture.setdefault("tour_name", service_name or "Tour o actividad")
+            capture.setdefault("tour_includes", service_description)
+            capture.setdefault("tour_date", service_start)
+            capture.setdefault("tour_price", service_price)
+            capture.setdefault("tour_currency", service_currency)
+        elif service_type == "OTRO":
+            capture.setdefault("other_service_name", service_name or "Otro servicio")
+            capture.setdefault("other_service_description", service_description)
+            capture.setdefault("other_service_price", service_price)
+            capture.setdefault("other_service_currency", service_currency)
 
     for opt, meta in service_opts:
         component = meta.get("component")
