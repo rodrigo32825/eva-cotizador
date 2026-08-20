@@ -681,6 +681,23 @@ def _prepare_capture_editor_from_draft() -> None:
             del st.session_state[key]
 
 
+def _hydrate_capture_widgets_from_draft(draft: dict[str, Any]) -> None:
+    """Restore durable captured values into Streamlit widgets before Step 3 renders.
+
+    This is the missing half of the edit flow: clearing stale widget state is not
+    enough. We must seed each widget key again from draft["capture_state"].
+    Catalog selector helper keys ending in `_choice` are intentionally excluded;
+    airline_selector/airport_selector rebuild those choices from saved IATA/name.
+    """
+    capture = dict(draft.get("capture_state") or {})
+    for key, value in capture.items():
+        key = str(key)
+        if key.endswith("_choice"):
+            continue
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
 def _option_charge_meta(captured_value, service_name: str, default_enabled: bool) -> dict[str, Any]:
     default_mode = "Estándar $250 MXN" if default_enabled else "Sin cargo"
     mode = captured_value(f"review_charge_mode_{service_name}", default_mode)
@@ -714,7 +731,7 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
         "CLIENTE_TELEFONO": _clean_catalog_text(draft.get("telefono")),
         "NUM_PASAJEROS": max(int(draft.get("num_viajeros", 1) or 1), 1),
         "MONEDA": "MXN",
-        "ESTATUS": "BORRADOR",
+        "ESTATUS": "COTIZADA",
         "NOTAS_INTERNAS": _json_meta({
             "componentes": list(draft.get("componentes", [])),
             "modo_viajero": draft.get("modo_viajero", "Registrar nuevo viajero"),
@@ -1066,6 +1083,59 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         elif kind == "service":
             service_opts.append((opt, meta))
 
+    # Backward/failure-tolerant recovery:
+    # if detail rows exist but 02_OPCIONES is missing or incomplete, infer the
+    # alternatives from the OPCION_IDs attached to flights/hotels. This prevents
+    # an otherwise valid saved quote from reopening as an empty form.
+    if flights and not flight_opts:
+        seen_flight_ids: list[str] = []
+        for row in flights:
+            oid = _clean_catalog_text(row.get("OPCION_ID"))
+            if oid not in seen_flight_ids:
+                seen_flight_ids.append(oid)
+        if not seen_flight_ids:
+            seen_flight_ids = [""]
+        for seq, oid in enumerate(seen_flight_ids, start=1):
+            related = [r for r in flights if _clean_catalog_text(r.get("OPCION_ID")) == oid] if oid else flights
+            tipos = {_clean_catalog_text(r.get("TIPO_TRAMO")).upper() for r in related}
+            if "MULTIDESTINO" in tipos:
+                trip_type = "Multidestino"
+            elif "REGRESO" in tipos:
+                trip_type = "Viaje redondo"
+            else:
+                trip_type = "Viaje sencillo"
+            synthetic = {
+                "OPCION_ID": oid,
+                "ORDEN": seq,
+                "NOMBRE_OPCION": f"VUELO · Opción {seq}",
+                "DESCRIPCION_CORTA": trip_type,
+                "MONEDA": _clean_catalog_text((related[0] if related else {}).get("MONEDA")) or "MXN",
+                "PRECIO_VENTA_ESTIMADO": float((related[0] if related else {}).get("PRECIO_VENTA_TOTAL") or 0.0),
+                "ACTIVA": "SI",
+            }
+            flight_opts.append((synthetic, {"kind": "flight", "index": seq, "trip_type": trip_type}))
+
+    if hotels and not hotel_opts:
+        seen_hotel_ids: list[str] = []
+        for row in hotels:
+            oid = _clean_catalog_text(row.get("OPCION_ID"))
+            if oid not in seen_hotel_ids:
+                seen_hotel_ids.append(oid)
+        if not seen_hotel_ids:
+            seen_hotel_ids = [""]
+        for seq, oid in enumerate(seen_hotel_ids, start=1):
+            related = [r for r in hotels if _clean_catalog_text(r.get("OPCION_ID")) == oid] if oid else hotels
+            synthetic = {
+                "OPCION_ID": oid,
+                "ORDEN": seq,
+                "NOMBRE_OPCION": f"HOSPEDAJE · Opción {seq}",
+                "DESCRIPCION_CORTA": _clean_catalog_text((related[0] if related else {}).get("HOTEL_NOMBRE")),
+                "MONEDA": _clean_catalog_text((related[0] if related else {}).get("MONEDA")) or "MXN",
+                "PRECIO_VENTA_ESTIMADO": float((related[0] if related else {}).get("PRECIO_VENTA_TOTAL") or 0.0),
+                "ACTIVA": "SI",
+            }
+            hotel_opts.append((synthetic, {"kind": "hotel", "index": seq}))
+
     flight_opts.sort(key=lambda x: int(x[1].get("index") or x[0].get("ORDEN") or 999))
     hotel_opts.sort(key=lambda x: int(x[1].get("index") or x[0].get("ORDEN") or 999))
     option_id_to_findex = {}
@@ -1093,7 +1163,10 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     grouped_counts: dict[tuple[int, str], int] = {}
     for row in flights:
         idx = option_id_to_findex.get(_clean_catalog_text(row.get("OPCION_ID")))
-        if not idx: continue
+        if not idx and len(flight_opts) == 1:
+            idx = int(flight_opts[0][1].get("index") or 1)
+        if not idx:
+            continue
         meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
         direction = meta.get("direction")
         if not direction:
@@ -1111,7 +1184,10 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     seg_counter: dict[tuple[int, str], int] = {}
     for row in sorted(flights, key=lambda r: (int(r.get("GRUPO_TRAMO") or 0), int(r.get("ORDEN_SEGMENTO") or 0))):
         idx = option_id_to_findex.get(_clean_catalog_text(row.get("OPCION_ID")))
-        if not idx: continue
+        if not idx and len(flight_opts) == 1:
+            idx = int(flight_opts[0][1].get("index") or 1)
+        if not idx:
+            continue
         meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
         direction = meta.get("direction") or ("return" if _clean_catalog_text(row.get("TIPO_TRAMO")).upper() == "REGRESO" else ("multicity" if _clean_catalog_text(row.get("TIPO_TRAMO")).upper() == "MULTIDESTINO" else "outbound"))
         key = (idx, direction); seg_counter[key] = seg_counter.get(key, 0) + 1; s = seg_counter[key]
@@ -1147,7 +1223,10 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
             capture["review_charge_total_Hospedaje"] = float(charge.get("total", 0.0) or 0.0)
     for row in hotels:
         idx = option_id_to_hindex.get(_clean_catalog_text(row.get("OPCION_ID")))
-        if not idx: continue
+        if not idx and len(hotel_opts) == 1:
+            idx = int(hotel_opts[0][1].get("index") or 1)
+        if not idx:
+            continue
         meta = _parse_json_meta(row.get("OBSERVACIONES_INTERNAS"))
         capture[f"hotel_name_{idx}"] = _clean_catalog_text(row.get("HOTEL_NOMBRE"))
         capture[f"hotel_city_{idx}"] = _clean_catalog_text(row.get("CIUDAD"))
@@ -3145,6 +3224,7 @@ def page_new_quote() -> None:
             st.rerun()
 
     elif step == 3:
+        _hydrate_capture_widgets_from_draft(draft)
         initialize_catalogs()
 
         if st.session_state.get("catalogs_loaded"):
@@ -4942,7 +5022,7 @@ def page_open_quote() -> None:
     ).strip()
     status_label = st.radio(
         "Estatus",
-        ["Todas", "Borradores", "Enviadas", "Vendidas"],
+        ["Todas", "Cotizaciones", "Enviadas", "Vendidas"],
         horizontal=True,
         key="open_quote_status",
     )
@@ -4966,10 +5046,15 @@ def page_open_quote() -> None:
         st.error(f"No pudimos buscar cotizaciones: {exc}")
         return
 
-    status_map = {"Borradores": "BORRADOR", "Enviadas": "ENVIADA", "Vendidas": "VENDIDA"}
-    wanted = status_map.get(status_label)
-    if wanted:
-        rows = [r for r in rows if _clean_catalog_text(r.get("ESTATUS")).upper() == wanted]
+    if status_label == "Cotizaciones":
+        rows = [
+            r for r in rows
+            if _clean_catalog_text(r.get("ESTATUS")).upper() in {"BORRADOR", "COTIZADA", "COTIZACION"}
+        ]
+    elif status_label == "Enviadas":
+        rows = [r for r in rows if _clean_catalog_text(r.get("ESTATUS")).upper() == "ENVIADA"]
+    elif status_label == "Vendidas":
+        rows = [r for r in rows if _clean_catalog_text(r.get("ESTATUS")).upper() == "VENDIDA"]
 
     if not rows:
         st.warning("No encontramos cotizaciones con esos criterios.")
@@ -4989,19 +5074,54 @@ def page_open_quote() -> None:
                 start_date = _date_iso(row.get("FECHA_INICIO_VIAJE"))
                 end_date = _date_iso(row.get("FECHA_FIN_VIAJE"))
                 if start_date or end_date: details.append(f"{start_date or '—'} → {end_date or '—'}")
-                status = _clean_catalog_text(row.get("ESTATUS")) or "BORRADOR"
-                details.append(status)
+                raw_status = (_clean_catalog_text(row.get("ESTATUS")) or "BORRADOR").upper()
+                display_status = {
+                    "BORRADOR": "COTIZACIÓN",
+                    "COTIZADA": "COTIZACIÓN",
+                    "COTIZACION": "COTIZACIÓN",
+                    "ENVIADA": "ENVIADA",
+                    "VENDIDA": "VENDIDA",
+                    "CANCELADA": "CANCELADA",
+                }.get(raw_status, raw_status)
+                details.append(display_status)
                 st.caption(" · ".join(details))
             with right:
                 if st.button("Abrir", key=f"open_quote_{folio}", use_container_width=True, type="primary"):
                     try:
                         bundle = api.quote_bundle(folio)
+
+                        detail_counts = {
+                            "opciones": len(bundle.get("opciones") or []),
+                            "vuelos": len(bundle.get("vuelos") or []),
+                            "hospedajes": len(bundle.get("hospedajes") or []),
+                            "servicios": len(bundle.get("servicios") or []),
+                        }
+                        quote_meta = _parse_json_meta((bundle.get("cotizacion") or {}).get("NOTAS_INTERNAS"))
+                        expected_components = list(quote_meta.get("componentes") or [])
+
+                        if (
+                            expected_components
+                            and not any(detail_counts[name] for name in ("vuelos", "hospedajes", "servicios"))
+                        ):
+                            raise RuntimeError(
+                                "El folio existe, pero no tiene guardado el detalle de vuelos, "
+                                "hospedaje o servicios. Esta cotización necesita reconstruirse "
+                                "una vez y volver a guardarse con el esquema actual."
+                            )
+
                         restored = reconstruct_draft_from_bundle(bundle)
                         _clear_quote_widget_state()
                         st.session_state.draft = restored
-                        st.session_state.quote_step = 4
+                        # Abrir significa editar: entra directamente al formulario con
+                        # los módulos reconstruidos, no a una revisión vacía.
+                        st.session_state.quote_step = 3
                         st.session_state.page = "Nueva cotización"
-                        st.success(f"Cotización {folio} cargada.")
+                        st.success(
+                            f"Cotización {folio} cargada · "
+                            f"{detail_counts['vuelos']} vuelo(s) · "
+                            f"{detail_counts['hospedajes']} hospedaje(s) · "
+                            f"{detail_counts['servicios']} servicio(s)."
+                        )
                         st.rerun()
                     except Exception as exc:
                         st.error(f"No pudimos abrir {folio}: {exc}")
