@@ -666,6 +666,21 @@ def _clear_quote_widget_state() -> None:
             del st.session_state[key]
 
 
+def _prepare_capture_editor_from_draft() -> None:
+    """Remove stale Step-3 widget state so the editor reloads durable captured data.
+
+    The quote data itself remains in draft["capture_state"]. Review charge widgets
+    are intentionally preserved because they are edited in Step 4, not Step 3.
+    """
+    prefixes = (
+        "flight_", "hotel_", "insurance_", "transfer_", "tour_", "car_",
+        "other_service_",
+    )
+    for key in list(st.session_state.keys()):
+        if any(str(key).startswith(prefix) for prefix in prefixes):
+            del st.session_state[key]
+
+
 def _option_charge_meta(captured_value, service_name: str, default_enabled: bool) -> dict[str, Any]:
     default_mode = "Estándar $250 MXN" if default_enabled else "Sin cargo"
     mode = captured_value(f"review_charge_mode_{service_name}", default_mode)
@@ -4372,6 +4387,7 @@ def page_new_quote() -> None:
                     "Editar vuelos",
                     key="review_edit_flights",
                 ):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4421,6 +4437,7 @@ def page_new_quote() -> None:
                 render_charge("hotel", chargeable_services["Hospedaje"])
 
                 if st.button("Editar hospedaje", key="review_edit_hotel"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4443,6 +4460,7 @@ def page_new_quote() -> None:
                 render_charge("insurance", chargeable_services["Seguro de viaje"])
 
                 if st.button("Editar seguro", key="review_edit_insurance"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4466,6 +4484,7 @@ def page_new_quote() -> None:
                 render_charge("transfer", chargeable_services["Traslados"])
 
                 if st.button("Editar traslado", key="review_edit_transfer"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4488,6 +4507,7 @@ def page_new_quote() -> None:
                 render_charge("car", chargeable_services["Renta de auto"])
 
                 if st.button("Editar renta de auto", key="review_edit_car"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4510,6 +4530,7 @@ def page_new_quote() -> None:
                 render_charge("tour", chargeable_services["Tours o actividades"])
 
                 if st.button("Editar tour", key="review_edit_tour"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
@@ -4529,6 +4550,7 @@ def page_new_quote() -> None:
                 render_charge("other", chargeable_services["Otro servicio"])
 
                 if st.button("Editar otro servicio", key="review_edit_other"):
+                    _prepare_capture_editor_from_draft()
                     st.session_state.quote_step = 3
                     st.rerun()
 
