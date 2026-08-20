@@ -4876,7 +4876,8 @@ def page_new_quote() -> None:
                 folio = _clean_catalog_text((result.get("cotizacion") or {}).get("COTIZACION_ID"))
                 draft["folio"] = folio
                 st.success(f"Cotización completa guardada · {folio}")
-                st.rerun()
+                # Continuar en este mismo paso para mostrar inmediatamente
+                # el botón "Generar / descargar PDF".
             except Exception as exc:
                 st.error(f"No pudimos guardar la cotización: {exc}")
 
