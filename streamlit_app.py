@@ -5296,7 +5296,7 @@ def build_travel_document_pdf(bundle: dict[str, Any]) -> bytes:
         name="TDRefLabel", fontName="Helvetica-Bold", fontSize=7, leading=8, textColor=teal
     ))
     styles.add(ParagraphStyle(
-        name="TDRef", fontName="Courier-Bold", fontSize=15, leading=17, textColor=dark
+        name="TDRef", fontName="Helvetica-Bold", fontSize=13, leading=15, textColor=dark
     ))
     styles.add(ParagraphStyle(
         name="TDPrice", fontName="Courier-Bold", fontSize=8.5, leading=10, textColor=muted, alignment=TA_RIGHT
