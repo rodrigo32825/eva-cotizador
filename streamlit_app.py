@@ -856,7 +856,7 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
     # Flights: one 02_OPCIONES row per alternative, many 04_VUELOS rows per segment.
     if "Vuelos" in draft.get("componentes", []):
         flight_count = max(int(draft.get("flight_options", 1) or 1), 1)
-        charge = _option_charge_meta(captured_value, "Vuelos", True)
+        charge = _option_charge_meta(captured_value, "flights", True)
         for option_idx in range(1, flight_count + 1):
             root = f"flight_{option_idx}"
             trip_type = captured_value(f"{root}_trip_type", "Viaje sencillo")
@@ -933,7 +933,7 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
 
     if "Hospedaje" in draft.get("componentes", []):
         hotel_count = max(int(draft.get("hotel_options", 1) or 1), 1)
-        charge = _option_charge_meta(captured_value, "Hospedaje", False)
+        charge = _option_charge_meta(captured_value, "hotel", False)
         for idx in range(1, hotel_count + 1):
             name = _clean_catalog_text(captured_value(f"hotel_name_{idx}", ""))
             city = _clean_catalog_text(captured_value(f"hotel_city_{idx}", ""))
@@ -986,7 +986,14 @@ def build_quote_bundle(draft: dict[str, Any], captured_value) -> dict[str, Any]:
             continue
         price = float(captured_value(price_key, 0.0) or 0.0)
         currency = _clean_catalog_text(captured_value(currency_key, "MXN")) or "MXN"
-        charge = _option_charge_meta(captured_value, component, service_defaults[component])
+        charge_key = {
+            "Seguro de viaje": "insurance",
+            "Traslados": "transfer",
+            "Renta de auto": "car",
+            "Tours o actividades": "tour",
+            "Otro servicio": "other",
+        }[component]
+        charge = _option_charge_meta(captured_value, charge_key, service_defaults[component])
         all_keys = {
             key: value for key, value in draft.get("capture_state", {}).items()
             if (alias == "INSURANCE" and str(key).startswith("insurance_"))
@@ -1195,11 +1202,11 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         multicity_counts[str(idx)] = multi
         charge = meta.get("charge") or {}
         if charge:
-            capture["review_charge_mode_Vuelos"] = charge.get("mode", "Estándar $250 MXN")
-            capture["review_charge_text_Vuelos"] = charge.get("concept", "Cargo por servicio")
-            capture["review_charge_amount_Vuelos"] = float(charge.get("unit_amount", 250.0) or 0.0)
-            capture["review_charge_apply_Vuelos"] = charge.get("apply", "Por cotización")
-            capture["review_charge_total_Vuelos"] = float(charge.get("total", 0.0) or 0.0)
+            capture["review_charge_mode_flights"] = charge.get("mode", "Estándar $250 MXN")
+            capture["review_charge_text_flights"] = charge.get("concept", "Cargo por servicio")
+            capture["review_charge_amount_flights"] = float(charge.get("unit_amount", 250.0) or 0.0)
+            capture["review_charge_apply_flights"] = charge.get("apply", "Por cotización")
+            capture["review_charge_total_flights"] = float(charge.get("total", 0.0) or 0.0)
 
     grouped_counts: dict[tuple[int, str], int] = {}
     for row in flights:
@@ -1257,11 +1264,11 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         option_id_to_hindex[_clean_catalog_text(opt.get("OPCION_ID"))] = idx
         charge = meta.get("charge") or {}
         if charge:
-            capture["review_charge_mode_Hospedaje"] = charge.get("mode", "Sin cargo")
-            capture["review_charge_text_Hospedaje"] = charge.get("concept", "")
-            capture["review_charge_amount_Hospedaje"] = float(charge.get("unit_amount", 0.0) or 0.0)
-            capture["review_charge_apply_Hospedaje"] = charge.get("apply", "Por cotización")
-            capture["review_charge_total_Hospedaje"] = float(charge.get("total", 0.0) or 0.0)
+            capture["review_charge_mode_hotel"] = charge.get("mode", "Sin cargo")
+            capture["review_charge_text_hotel"] = charge.get("concept", "")
+            capture["review_charge_amount_hotel"] = float(charge.get("unit_amount", 0.0) or 0.0)
+            capture["review_charge_apply_hotel"] = charge.get("apply", "Por cotización")
+            capture["review_charge_total_hotel"] = float(charge.get("total", 0.0) or 0.0)
     for row in hotels:
         idx = option_id_to_hindex.get(_clean_catalog_text(row.get("OPCION_ID")))
         if not idx and len(hotel_opts) == 1:
@@ -1340,11 +1347,19 @@ def reconstruct_draft_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
         component = meta.get("component")
         charge = meta.get("charge") or {}
         if component and charge:
-            capture[f"review_charge_mode_{component}"] = charge.get("mode", "Sin cargo")
-            capture[f"review_charge_text_{component}"] = charge.get("concept", "")
-            capture[f"review_charge_amount_{component}"] = float(charge.get("unit_amount", 0.0) or 0.0)
-            capture[f"review_charge_apply_{component}"] = charge.get("apply", "Por cotización")
-            capture[f"review_charge_total_{component}"] = float(charge.get("total", 0.0) or 0.0)
+            charge_key = {
+                "Seguro de viaje": "insurance",
+                "Traslados": "transfer",
+                "Renta de auto": "car",
+                "Tours o actividades": "tour",
+                "Otro servicio": "other",
+            }.get(component)
+            if charge_key:
+                capture[f"review_charge_mode_{charge_key}"] = charge.get("mode", "Sin cargo")
+                capture[f"review_charge_text_{charge_key}"] = charge.get("concept", "")
+                capture[f"review_charge_amount_{charge_key}"] = float(charge.get("unit_amount", 0.0) or 0.0)
+                capture[f"review_charge_apply_{charge_key}"] = charge.get("apply", "Por cotización")
+                capture[f"review_charge_total_{charge_key}"] = float(charge.get("total", 0.0) or 0.0)
 
     full_name = _clean_catalog_text(principal.get("NOMBRE_COMPLETO_DOCUMENTO")) or _clean_catalog_text(quote.get("CLIENTE_NOMBRE"))
     return {
@@ -5779,8 +5794,20 @@ def page_travel_document() -> None:
                 else:
                     unconfirmed_charge_options.append(option_id)
             else:
-                st.caption("Sin cargo por servicio EVA en la cotización.")
-                confirmed_charges[option_id] = 0.0
+                option_meta = _parse_json_meta(option.get("OBSERVACIONES_INTERNAS"))
+                persisted_charge = dict(option_meta.get("charge") or {})
+                persisted_mode = _clean_catalog_text(persisted_charge.get("mode"))
+
+                if persisted_mode == "Sin cargo":
+                    st.caption("Sin cargo por servicio EVA en la cotización.")
+                    confirmed_charges[option_id] = 0.0
+                else:
+                    st.warning(
+                        "Esta opción proviene de una cotización anterior en la que el cargo EVA "
+                        "se mostraba en pantalla, pero no quedó persistido en 02_OPCIONES. "
+                        "Abre la cotización, confirma su cargo EVA en Revisión y guarda cambios una vez."
+                    )
+                    unconfirmed_charge_options.append(option_id)
 
             tipo_referencia = _travel_reference_type(bundle, option)
             final_prices[option_id] = float(final_price)
